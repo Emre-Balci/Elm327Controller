@@ -10,7 +10,9 @@
 /// - Samples of PID values, through an SpscQueue, so that no value of a monitor is lost;
 /// - TraceLines, the traffic with the adapter and the worker's messages, through another SpscQueue;
 /// - UdsResults, the outcome of each UDS request of expert mode, through a third one, so that the
-///   three steps of a write (read, write, read again) all arrive.
+///   three steps of a write (read, write, read again) all arrive;
+/// - FeatureResults, what each feature of the Features tab was found to be or turned into, through
+///   a fourth one.
 ///
 /// cancel() interrupts the operation in progress and drops the requests posted before it, like
 /// Ctrl+C in the shell.
@@ -40,6 +42,7 @@
 #include "elm327/adapter/adapter.hpp"
 #include "elm327/adapter/response.hpp"
 #include "elm327/controller/controller.hpp"
+#include "elm327/expert/feature.hpp"
 #include "elm327/expert/uds.hpp"
 #include "elm327/obd/dtc.hpp"
 #include "elm327/obd/message.hpp"
@@ -68,6 +71,9 @@ enum class RequestKind : std::uint8_t {
     kRaw,           ///< Send Request::command to the adapter as it is.
     kUds,           ///< Send the UDS request Request::command and report a UdsResult (expert mode).
     kUdsWrite,      ///< Write Request::value to Request::did with a backup: read, write, read again.
+    kFeatureRead,     ///< Read the state of Request::feature and report a FeatureResult.
+    kFeatureChange,   ///< Turn Request::feature on or off (Request::feature_on).
+    kFeatureRestore,  ///< Write Request::backup back to the setting of Request::feature.
     kStop,          ///< End the thread.
 };
 
@@ -88,6 +94,12 @@ struct Request final {
     /// kUdsWrite: the data identifier and the value to write.
     std::uint16_t did{0U};
     common::StaticVector<std::uint8_t, expert::kMaxRequestData> value{};
+    /// kFeatureRead, kFeatureChange, kFeatureRestore: the feature, its position in the window's
+    /// list (returned in the FeatureResult), whether to turn it on, and the backup to restore.
+    expert::Feature feature{};
+    std::uint16_t feature_index{0U};
+    bool feature_on{false};
+    common::StaticVector<std::uint8_t, expert::kMaxFeatureValue> backup{};
     std::uint32_t generation{0U};  ///< Set by Worker::post(); see Worker::cancel().
 };
 
@@ -102,7 +114,9 @@ enum class Activity : std::uint8_t {
     kReadingDtcs,
     kReadingVin,
     kSendingCommand,
-    kTalkingToEcu,  ///< A UDS request of expert mode.
+    kTalkingToEcu,      ///< A UDS request of expert mode.
+    kCheckingFeatures,  ///< Reading the state of a feature.
+    kChangingFeature,   ///< Turning a feature on or off, or restoring it.
 };
 
 /// @return a description of @p activity for the user, e.g. "Reading trouble codes".
@@ -192,6 +206,13 @@ struct UdsResult final {
     MessageText reason{};
 };
 
+/// The outcome of a feature request: what the feature is now, and what was written.
+struct FeatureResult final {
+    RequestKind kind{RequestKind::kFeatureRead};  ///< kFeatureRead, kFeatureChange or kFeatureRestore.
+    std::uint16_t index{0U};                      ///< Request::feature_index.
+    expert::FeatureReading reading{};
+};
+
 /// Called on the worker's thread after it published something, e.g. to wake up the user
 /// interface (glfwPostEmptyEvent()). Must not block.
 using NotifyFunction = void (*)(void* context) noexcept;
@@ -202,6 +223,7 @@ public:
     static constexpr std::size_t kSampleCapacity{64U};
     static constexpr std::size_t kTraceCapacity{512U};
     static constexpr std::size_t kUdsCapacity{64U};
+    static constexpr std::size_t kFeatureCapacity{expert::kMaxFeatures};
 
     Worker() noexcept = default;
 
@@ -259,6 +281,11 @@ public:
         return uds_results_.try_pop(result);
     }
 
+    /// @return true with the oldest FeatureResult not taken yet in @p result.
+    [[nodiscard]] bool take_feature_result(FeatureResult& result) noexcept {
+        return feature_results_.try_pop(result);
+    }
+
     /// Samples and trace lines dropped because the user interface did not take them in time.
     [[nodiscard]] std::uint64_t dropped() const noexcept {
         return dropped_.load(std::memory_order_relaxed);
@@ -288,6 +315,8 @@ private:
     /// Sends the UDS request @p command, decodes the reply, and publishes a UdsResult labelled
     /// @p label, with a message for the status line. @return its outcome.
     UdsResult::Outcome exchange_uds(std::string_view label, std::string_view command) noexcept;
+    /// Reads, changes or restores a feature and publishes a FeatureResult.
+    void run_feature(const Request& request) noexcept;
 
     /// Queries @p command into @p text; "unknown" if the adapter does not know the command.
     common::Status query(std::string_view command, AdapterText& text) noexcept;
@@ -315,6 +344,7 @@ private:
     common::SpscQueue<Sample, kSampleCapacity> samples_{};
     common::SpscQueue<TraceLine, kTraceCapacity> trace_{};
     common::SpscQueue<UdsResult, kUdsCapacity> uds_results_{};
+    common::SpscQueue<FeatureResult, kFeatureCapacity> feature_results_{};
     std::atomic<std::uint32_t> generation_{0U};
     std::atomic<std::uint64_t> dropped_{0U};
     std::int32_t wake_descriptor_{-1};    ///< eventfd: a request was posted.
@@ -326,6 +356,7 @@ private:
 
     // The worker's thread only.
     Controller controller_{};
+    expert::FeatureCoder features_{controller_};  ///< After controller_, which it uses.
     Response response_{};         ///< Replies to raw commands and UDS requests.
     MessageList uds_messages_{};  ///< Scratch for decoding UDS replies.
     State state_{};

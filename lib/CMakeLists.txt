@@ -12,6 +12,7 @@ add_library(elm327 STATIC
     src/controller/signals.cpp
     src/controller/timing.cpp
     src/expert/coding.cpp
+    src/expert/feature.cpp
     src/expert/uds.cpp
     src/obd/client.cpp
     src/obd/dtc.cpp

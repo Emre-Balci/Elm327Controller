@@ -1,9 +1,9 @@
-# elm327gui, the graphical front-end. The worker thread that talks to the adapter, and the scales of
-# the gauges of widget mode, are the library elm327gui_core, which does not depend on ImGui, so the
-# tests run them without a display. The window itself uses Dear ImGui (the git submodule
-# third_party/imgui) on GLFW and OpenGL 3.
+# elm327gui, the graphical front-end. The worker thread that talks to the adapter, the scales of the
+# gauges of widget mode, and the files of the Features tab are the library elm327gui_core, which does
+# not depend on ImGui, so the tests run them without a display. The window itself uses Dear ImGui
+# (the git submodule third_party/imgui) on GLFW and OpenGL 3.
 if(ELM327_BUILD_TESTS OR NOT ELM327_BUILD_GUI STREQUAL "OFF")
-    add_library(elm327gui_core STATIC gauge.cpp worker.cpp)
+    add_library(elm327gui_core STATIC features.cpp gauge.cpp worker.cpp)
     # The sources include each other as "gui/<file>.hpp".
     target_include_directories(elm327gui_core PUBLIC "${PROJECT_SOURCE_DIR}")
     target_link_libraries(elm327gui_core

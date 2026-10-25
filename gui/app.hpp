@@ -9,6 +9,9 @@
 ///   (see Dashboard);
 /// - Trouble codes: the MIL status and the stored, pending and permanent DTCs;
 /// - Vehicle: the VIN and what the adapter tells about itself;
+/// - Features: the features of the car that the definitions describe (see expert::Feature), each
+///   with its state and a button to turn it on or off, and Undo -- no codes. Every change is
+///   confirmed, saved first, and recorded in the backup file (see features.hpp);
 /// - Terminal: the traffic with the adapter, and a line to send AT commands or OBD requests;
 /// - Expert: UDS/KWP requests to an ECU (target, session, data identifiers, routines, security
 ///   access, reset, any request), their results, and the coding reference. Every request that can
@@ -24,12 +27,15 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 #include "common/containers/static_string.hpp"
 #include "common/protocol/delimited_framer.hpp"
 #include "common/time/clock.hpp"
 #include "elm327/controller/controller.hpp"
+#include "elm327/expert/feature.hpp"
 #include "gui/dashboard.hpp"
+#include "gui/features.hpp"
 #include "gui/worker.hpp"
 
 namespace elm327 {
@@ -39,6 +45,7 @@ enum class Tab : std::uint8_t {
     kLive,
     kTroubleCodes,
     kVehicle,
+    kFeatures,
     kTerminal,
     kExpert,
 };
@@ -78,6 +85,12 @@ public:
     /// Fills the connection bar from @p options and posts what they ask for.
     void start(const StartOptions& options) noexcept;
 
+    /// Gives the Features tab its definitions. @p source says where they come from, @p problem what
+    /// was wrong with the user's file (empty if nothing), and @p log_directory where the changes
+    /// are recorded (empty: they are not).
+    void set_features(const expert::FeatureList& features, std::string_view source, std::string_view problem,
+                      std::string_view log_directory) noexcept;
+
     /// Takes what the worker published and draws one frame. Call between ImGui::NewFrame() and
     /// ImGui::Render().
     void draw() noexcept;
@@ -109,6 +122,11 @@ private:
     void draw_plots() noexcept;
     void draw_trouble_codes() noexcept;
     void draw_vehicle() noexcept;
+    void draw_features() noexcept;
+    /// One feature in the table of its group: name and description, state, buttons.
+    void draw_feature(std::size_t index, const State& state) noexcept;
+    /// Asks before a feature is turned on or off, or undone.
+    void draw_feature_confirmation() noexcept;
     void draw_terminal() noexcept;
     void draw_expert() noexcept;
     /// The requests of expert mode, left of their results.
@@ -119,6 +137,15 @@ private:
     void draw_confirmation() noexcept;
     void draw_status() noexcept;
     void log_uds(const UdsResult& result) noexcept;
+
+    // The Features tab.
+    /// Checks every feature again; the requests go out as the worker's queue takes them.
+    void check_features() noexcept;
+    /// Posts a request of @p kind for feature @p index. @return true if the worker took it.
+    bool post_feature(RequestKind kind, std::size_t index, bool on) noexcept;
+    void take_feature(const FeatureResult& result) noexcept;
+    /// Forgets the requests on their way, after a cancel or when the connection ends.
+    void forget_feature_requests() noexcept;
 
     // The actions of expert mode. Each checks its fields, and says what is wrong in expert_error_.
     void apply_target() noexcept;
@@ -191,6 +218,30 @@ private:
     std::size_t log_next_{0U};
     bool scroll_log_{false};
     std::array<char, Adapter::kMaxCommandLength + 1U> command_{};
+
+    // The Features tab: the definitions, what each feature was found to be, and a change waiting for
+    // confirmation.
+    struct FeatureView final {
+        bool checked{false};  ///< A reading arrived since the connection began.
+        bool busy{false};     ///< A request for it is on its way.
+        expert::FeatureReading reading{};
+        /// The setting before the first change of this connection: what Undo writes back. A backup
+        /// never outlives the connection, so that it is never written into another car.
+        bool has_backup{false};
+        common::StaticVector<std::uint8_t, expert::kMaxFeatureValue> backup{};
+    };
+    expert::FeatureList features_{};
+    std::array<FeatureView, expert::kMaxFeatures> feature_views_{};
+    common::StaticString<256U> features_source_{};
+    common::StaticString<256U> features_problem_{};
+    Path log_directory_{};
+    std::size_t check_next_{0U};      ///< The next feature to check; features_.size() when none is due.
+    bool features_requested_{false};  ///< Checked since the connection began.
+    bool hide_absent_{true};          ///< Hide the features the car does not have.
+    std::size_t confirm_index_{0U};
+    bool confirm_on_{false};
+    bool confirm_undo_{false};
+    bool open_feature_confirmation_{false};
 
     // Expert mode: the fields, the results, and a request waiting for confirmation.
     std::array<char, 9U> target_header_{};   ///< e.g. "7E0"; ATSH.

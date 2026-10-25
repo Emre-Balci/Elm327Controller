@@ -10,7 +10,9 @@ add_executable(elm327_tests
     cli/test_options.cpp
     cli/test_shell.cpp
     controller/test_controller.cpp
+    expert/test_feature.cpp
     expert/test_uds.cpp
+    gui/test_features.cpp
     gui/test_gauge.cpp
     gui/test_worker.cpp
     obd/test_client.cpp

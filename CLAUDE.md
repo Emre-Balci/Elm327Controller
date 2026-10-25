@@ -10,8 +10,10 @@ used.
   `lib/src/<group>/`: `adapter` talks to the ELM327 over the serial port; `obd` holds the OBD-II
   services (messages, PIDs, DTCs, VIN, `ObdClient` with `clear_dtcs()`) and `service.hpp`, which
   classifies a request as read or write for the read-only gate; `expert` holds `uds.hpp` (building
-  and decoding UDS/KWP requests) and `coding.hpp` (a reference map for VAG/Renault/BMW, no
-  car-specific values); `controller` holds `Controller`, the connection the front-ends share, with
+  and decoding UDS/KWP requests), `feature.hpp` (feature definitions, and `FeatureCoder`, which
+  turns a feature on and off: identification and length checks, backup, session, write, verify,
+  restore) and `coding.hpp` (a reference map for VAG/Renault/BMW, no car-specific values);
+  `controller` holds `Controller`, the connection the front-ends share, with
   its `AccessPolicy` (the read-only safety mode, enforced in `execute()` and `clear_dtcs()`),
   `explain.hpp` (failures in words), `signals.hpp` (`StopSignals`) and `timing.hpp` (periodic
   reads). Logic both front-ends need belongs here.
@@ -19,7 +21,9 @@ used.
   default-deny) and `Controller` (`set_access_policy()`), so every front-end -- `raw`, `clear`,
   `uds`, the GUI terminal -- is covered at one choke point. Expert mode is the UDS/KWP toolkit in
   `expert/`; keep it protocol-only, with ECU-specific data left to the user, and never add odometer,
-  immobiliser or emissions-defeat functions.
+  immobiliser or emissions-defeat functions. Feature definitions are data, too: the only built-in
+  ones are the simulator's (`gui/features.cpp`, matching its "SIM-" part numbers). Add definitions
+  for a real car only when they were verified on it, with its part number in `identify`.
 - `cli/`: `elm327ctl`. Everything but `main.cpp` is the `elm327ctl_core` library, so the tests can
   run commands and the shell in-process. `commands` runs the commands over a `Controller`
   (`Session`), `shell` the interactive loop, `terminal` reads lines (raw mode on a terminal),
@@ -29,14 +33,21 @@ used.
   ImGui; `main` sets up GLFW and OpenGL. The window never does serial I/O. The Expert tab posts UDS
   requests (`RequestKind::kUds`, and `kUdsWrite`, which backs the value up first and writes nothing
   without that backup) and gets a `UdsResult` for each through a queue of its own; every request it
-  can send that changes the vehicle goes through its confirmation dialog. Widget mode: `gauge`
-  (also in `elm327gui_core`, no ImGui) holds the scale of every dial and plans the layout, so a new
-  dial is a row in its table plus a test; `dashboard` draws them.
+  can send that changes the vehicle goes through its confirmation dialog. The Features tab posts
+  `kFeatureRead`, `kFeatureChange` and `kFeatureRestore` with the definition by value and gets a
+  `FeatureResult` each through another queue; `features` (in `elm327gui_core`) holds the built-in
+  definitions, loads the user's file and appends every change to `backups.txt` in
+  `~/.config/elm327controller` (found with `getpwuid_r`, as MISRA bans `getenv`). Widget mode:
+  `gauge` (also in `elm327gui_core`, no ImGui) holds the scale of every dial and plans the layout,
+  so a new dial is a row in its table plus a test; `dashboard` draws them.
 - `sim/`: `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal, and the `elm327sim`
   tool. It answers OBD-II (service 01/03/04/07/09/0A) and a subset of UDS (sessions, read/write data
-  by identifier, routine, security, tester present, reset) with data identifiers in
-  `Vehicle::data_by_identifier`, so a read-only test can confirm no write ever reaches it. Extend it
-  whenever the library learns a new command, so the tests can cover it.
+  by identifier, routine, security, tester present, reset). The engine module answers the default
+  header with `Vehicle::data_by_identifier`; `Vehicle::modules` adds modules at their own header
+  (ATSH), e.g. the cluster at 714, and any other header gets "NO DATA". Writes to
+  `session_protected_dids` need the extended session, and `locked_dids` refuse them (security
+  access). `did_value()` lets a test check what a write did, and that in read-only mode none
+  arrived. Extend it whenever the library learns a new command, so the tests can cover it.
 - `tests/<group>/`, `tests/cli/`, `tests/gui/`: tests with the same minimal framework as Common's.
 - `third_party/common`: the Common library as a git submodule. Do not edit it here: changes to
   Common go to its own repository (`/mnt/d/Repos/Common`), and this repository then moves the
