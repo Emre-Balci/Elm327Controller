@@ -105,6 +105,12 @@ const char* to_string(const Activity activity) noexcept {
         case Activity::kTalkingToEcu:
             text = "Talking to the ECU";
             break;
+        case Activity::kCheckingFeatures:
+            text = "Checking the features";
+            break;
+        case Activity::kChangingFeature:
+            text = "Changing a feature";
+            break;
     }
     return text;
 }
@@ -280,6 +286,11 @@ void Worker::handle(const Request& request) noexcept {
             break;
         case RequestKind::kUdsWrite:
             uds_write(request);
+            break;
+        case RequestKind::kFeatureRead:
+        case RequestKind::kFeatureChange:
+        case RequestKind::kFeatureRestore:
+            run_feature(request);
             break;
         case RequestKind::kStop:
             stopping_ = true;
@@ -624,6 +635,47 @@ UdsResult::Outcome Worker::exchange_uds(const std::string_view label, const std:
         static_cast<void>(dropped_.fetch_add(1U, std::memory_order_relaxed));
     }
     return result.outcome;
+}
+
+void Worker::run_feature(const Request& request) noexcept {
+    if (require_connection()) {
+        const bool check{request.kind == RequestKind::kFeatureRead};
+        begin(check ? Activity::kCheckingFeatures : Activity::kChangingFeature);
+        FeatureResult result{};
+        result.kind = request.kind;
+        result.index = request.feature_index;
+        if (check) {
+            result.reading = features_.read(request.feature);
+        } else if (request.kind == RequestKind::kFeatureChange) {
+            result.reading = features_.change(request.feature, request.feature_on);
+        } else {
+            const common::Span<const std::uint8_t> backup{request.backup.data(), request.backup.size()};
+            result.reading = features_.restore(request.feature, backup);
+        }
+        const expert::FeatureState state{result.reading.state};
+        const bool known{(state == expert::FeatureState::kOn) || (state == expert::FeatureState::kOff) ||
+                         (state == expert::FeatureState::kOther)};
+        // A change is told on the status line and in the terminal; a check only when it failed.
+        if ((!check) || (state == expert::FeatureState::kFailed)) {
+            MessageText text{};
+            put(text, request.feature.name.text());
+            put(text, ": ");
+            if (known && (!result.reading.written.empty())) {
+                if (request.kind == RequestKind::kFeatureRestore) {
+                    put(text, "restored.");
+                } else {
+                    put(text, (state == expert::FeatureState::kOn) ? "turned on." : "turned off.");
+                }
+            } else {
+                put(text, result.reading.reason.text());
+            }
+            note(text.text(), !known);
+        }
+        if (!feature_results_.try_push(result)) {
+            static_cast<void>(dropped_.fetch_add(1U, std::memory_order_relaxed));
+        }
+        finish();
+    }
 }
 
 common::Status Worker::query(const std::string_view command, AdapterText& text) noexcept {

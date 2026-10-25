@@ -5,7 +5,8 @@ the VIN from a vehicle, monitor values over time, and pass raw commands to the a
 [read-only mode](#read-only-mode) makes the tools safe to leave connected to a car: it refuses, before
 sending, anything that could change the vehicle. An [expert mode](#expert-mode-uds-kwp-and-coding)
 adds UDS/KWP requests for the manufacturer-specific diagnostics and coding that tools such as VCDS,
-OBDeleven, ddt4all and BimmerCode use.
+OBDeleven, ddt4all and BimmerCode use. The GUI's [Features tab](#the-features-tab) turns features of
+a car on and off with one button, from definitions that describe them, without showing any code.
 
 The project has two parts:
 
@@ -277,12 +278,14 @@ the law where you drive.
 ## The GUI
 
 `elm327gui` shows a connection bar (device, with a list of the USB and Bluetooth serial devices
-found; baud rate; protocol; [Read-only](#read-only-mode)) and five tabs:
+found; baud rate; protocol; [Read-only](#read-only-mode)) and six tabs:
 
 - **Live data**: the PIDs the vehicle supports, with their latest values. Ticked PIDs (up to 16)
   are monitored at the chosen interval and plotted, or, in widget mode, shown as gauges.
 - **Trouble codes**: the MIL status and the stored, pending and permanent DTCs.
 - **Vehicle**: the VIN, and what the adapter tells about itself.
+- **Features**: features of the car with their state, each turned on and off with one button (see
+  [the Features tab](#the-features-tab)).
 - **Terminal**: the traffic with the adapter, and a line to send AT commands or OBD requests.
 - **Expert**: UDS/KWP requests to an ECU, their results, and the coding reference (see
   [the Expert tab](#the-expert-tab)).
@@ -298,7 +301,9 @@ Usage: elm327gui [options]
   -i, --interval MS     time between the samples of the monitor (default 1000)
   -w, --widgets         widget mode: the live data as the gauges of a dashboard
   -r, --read-only       safe mode: refuse anything that could change the vehicle
-      --tab NAME        open the tab live, codes, vehicle, terminal or expert
+      --tab NAME        open the tab live, codes, vehicle, features, terminal or expert
+      --features FILE   the definitions of the Features tab (default: features.ini in
+                        ~/.config/elm327controller)
       --screenshot FILE save the window as a PPM image once it is idle, then exit
 ```
 
@@ -339,6 +344,81 @@ Without GLFW, CMake leaves the GUI out and says so; the library and `elm327ctl` 
 
 It needs a display: X11 or Wayland, e.g. WSLg on Windows 11. `--screenshot` renders the window,
 saves it and exits, for documentation and smoke tests.
+
+### The Features tab
+
+The **Features** tab (or `--tab features`) is the simple way to change a car: each feature shows
+its state and has one button, and no code appears.
+
+![elm327gui's Features tab with the features of the simulated car: the needle sweep was just turned on, and Undo can put it back](docs/elm327gui-features.png)
+
+- When the tab opens, every feature is checked: **On**, **Off**, **Another value**, or **Not on
+  this car**. Checking only reads, so it works in read-only mode too; *Check again* repeats it.
+- **Turn on** / **Turn off** asks once, then changes the feature. **Undo** puts the setting back to
+  what it was before your first change since you connected.
+- Behind each button the engine refuses rather than guesses. It first checks that the module is the
+  one the definition was made for (its part number, and the length of the setting). It reads the
+  setting and keeps it as the backup, changes only the feature's bits, writes it in the diagnostic
+  session the module needs, reads it back to verify, and returns the module to its normal session.
+  If anything does not match, nothing is written.
+- Every change is also recorded in `~/.config/elm327controller/backups.txt`, e.g. `Needle sweep:
+  module 714, DID 0600, before 12 00 40 00, after 13 00 40 00`, so that it can be undone after the
+  program has ended (in the Expert tab: target 714, then write DID 0600 with the *before* value).
+- In read-only mode the buttons are disabled. *Hide what this car does not have* leaves out the
+  features whose module is missing or another one.
+
+The tab comes with the features of `elm327sim`'s simulated car, to try it without a car. They match
+only the simulator: on a real car they find *Not on this car* and change nothing.
+
+### Adding features for your car
+
+A feature is defined once, in a text file, by someone who has verified it on the car; after that it
+is one button. `elm327gui` reads `features.ini` from `~/.config/elm327controller/`, or the file
+given with `--features`. This is the simulator's needle sweep; for your car, every value comes from
+your car:
+
+```ini
+# One [section] per feature; lines that start with # or ; are comments.
+[Needle sweep]
+group    = Instrument cluster
+about    = Sweeps the needles across the dials when the ignition comes on.
+note     = Takes effect the next time the ignition comes on.
+request  = 714
+reply    = 77E
+identify = F187 SIM-CLUSTER
+did      = 0600
+length   = 4
+byte     = 0
+bit      = 0
+```
+
+| Key | Meaning |
+|---|---|
+| `[name]` | The feature's name, as the tab shows it. |
+| `group`, `about`, `note` | Optional: the heading it is listed under, what it does, and when it takes effect. |
+| `request`, `reply` | The module's CAN identifiers: 3 hexadecimal digits (11 bit) or 8 (29 bit). |
+| `identify` | A DID and the start of its value, usually the part number (DID `F187`); several separated by `\|`, or `*` for any module at that address. |
+| `did`, `length` | The DID that holds the setting (e.g. a coding or an adaptation), and its length in bytes. |
+| `byte`, `bit` | The byte with the feature (from 0), and its bit (0 is the rightmost), set when the feature is on. |
+| `mask`, `on`, `off` | Instead of `bit`: the feature's bits in the byte, and their values when on and off, in hexadecimal. For a field such as a count of flashes, or a bit that is set when the feature is off. |
+| `session` | Optional: the diagnostic session of the change, in hexadecimal (default `03`, the extended session). |
+| `address` | Optional: the module's ISO-TP extended address, in hexadecimal (as on BMW). |
+
+A definition without any of the required keys is rejected with its line, and so is the whole file,
+so that a feature is never applied to a module it does not name. To find the values, read the
+module's part number (DID `F187`) and the setting in the Expert tab first. Take the byte and bit
+from a source that documents your exact module (the long-coding guides of VCDS and OBDeleven, the
+ECU database of ddt4all, the BimmerCode community), and put your module's part number in `identify`.
+Bits are counted from 0 on the right, as in the long-coding helper of VCDS.
+
+What the tab cannot do yet:
+
+- **Settings longer than 4 bytes.** A plain ELM327 sends one CAN frame per request, and a
+  WriteDataByIdentifier of a two-byte DID carries at most 4 bytes in one. Many long codings are
+  longer and need multi-frame sending; the tab says so instead of writing. Adaptation values and
+  short codings fit.
+- **Modules that need security access** for the change: the tab shows them as *Locked*.
+- **Vehicles without CAN** (ISO 15765-4).
 
 ### The Expert tab
 
@@ -388,7 +468,7 @@ in the library, below the window.
 |---|---|---|
 | Adapter | `elm327/adapter/` | `Adapter` sends a command over the serial port and collects the reply lines up to the `>` prompt, within a deadline and cancellable through a descriptor. After a command was interrupted, the next one waits for its late reply or stops the adapter, so a program can go on after Ctrl+C. `Response` classifies the lines (`OK`, `NO DATA`, `UNABLE TO CONNECT`, `CAN ERROR`, ...). |
 | OBD-II | `elm327/obd/` | `parse_messages()` turns reply lines into vehicle messages, including CAN multi-frame replies. `pid.hpp` names and decodes the service 01 PIDs exactly, `dtc.hpp` and `vin.hpp` decode trouble codes and the VIN in the CAN and the older formats. `ObdClient` runs the requests (and `clear_dtcs()`, service 04). `service.hpp` classifies a request as read or write for the read-only gate. |
-| Expert | `elm327/expert/` | `uds.hpp` builds and decodes UDS (ISO 14229) and KWP2000 requests -- session control, read/write data by identifier, routine control, security access, ECU reset, tester present -- and names the negative response codes. `decode_uds_response()` turns the adapter's reply, multi-frame included, into a `UdsExchange` that owns its bytes; both front-ends use it. `coding.hpp` is a reference map of common owner codings for VAG, Renault and BMW (no car-specific values). |
+| Expert | `elm327/expert/` | `uds.hpp` builds and decodes UDS (ISO 14229) and KWP2000 requests -- session control, read/write data by identifier, routine control, security access, ECU reset, tester present -- and names the negative response codes. `decode_uds_response()` turns the adapter's reply, multi-frame included, into a `UdsExchange` that owns its bytes; both front-ends use it. `feature.hpp` reads [feature definitions](#adding-features-for-your-car) and `FeatureCoder` turns a feature on and off safely: identification and length checks, backup, session, write, verification, restore. `coding.hpp` is a reference map of common owner codings for VAG, Renault and BMW (no car-specific values). |
 | Controller | `elm327/controller/` | `Controller` keeps a connection: it opens and initializes the adapter in one step and tells which step failed, reads the supported PIDs once, notices an unplugged device, and returns PID values that own their bytes. Its access policy enforces [read-only mode](#read-only-mode) on every write. `explain.hpp` puts failures into words, `signals.hpp` stops a program cleanly on Ctrl+C, and `timing.hpp` schedules periodic reads without drift. |
 
 A program uses it like this:
@@ -439,7 +519,7 @@ the result once, half to even, to the resolution of the PID, so `(256 * A + B) /
 |---|---|---|
 | Commands | `cli/commands.hpp` | `Session` runs the commands over a `Controller`: once for the command line, one after the other for the shell. Output goes through `Console`, without stdio. |
 | Shell | `cli/shell.hpp`, `cli/terminal.hpp`, `cli/line_editor.hpp` | The shell reads lines through `LineInput`: in raw mode on a terminal, where `LineEditor` turns the keys into a line, or as plain lines from a pipe. While a command runs the terminal is back in its normal mode, so Ctrl+C reaches the command as SIGINT (through `StopSignals`), and the shell takes the request and goes on. |
-| GUI worker | `gui/worker.hpp` | `Worker` owns the `Controller` on its own thread. The window posts requests through an `SpscQueue`; the worker publishes a `State` snapshot through a `TripleBuffer`, and PID samples, the traffic and the results of expert mode (`UdsResult`) through three more queues. Nobody waits for anybody; `cancel()` interrupts the operation in progress. |
+| GUI worker | `gui/worker.hpp` | `Worker` owns the `Controller` on its own thread. The window posts requests through an `SpscQueue`; the worker publishes a `State` snapshot through a `TripleBuffer`, and PID samples, the traffic, the results of expert mode (`UdsResult`) and of the Features tab (`FeatureResult`) through four more queues. Nobody waits for anybody; `cancel()` interrupts the operation in progress. |
 | GUI window | `gui/app.hpp`, `gui/main.cpp` | `App` draws the State with ImGui each frame and turns clicks into requests. `main.cpp` sets up GLFW and the OpenGL 3 backend, and redraws on input, on a result of the worker, or 30 times per second while it works. |
 | Widget mode | `gui/gauge.hpp`, `gui/dashboard.hpp` | `gauge.hpp` knows which PIDs suit a dial and the scale of each (range, ticks, zones, words such as E and F), the geometry of needle and ticks, and plans the layout of a dashboard; it does not draw, so the tests cover it. `Dashboard` draws the dials and the digital displays with ImGui's draw lists, and moves each needle smoothly toward its value. |
 | Simulator | `sim/` | `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal: the fixture of the tests and the core of `elm327sim`. |
@@ -509,6 +589,9 @@ git commit -m "Update Dear ImGui to 1.93.0"
 
 ## Next steps
 
+- Multi-frame (ISO-TP) sending through a plain ELM327, so that the Features tab can write long
+  codings; it needs testing on real adapters, whose clones differ.
+- Feature definitions for specific cars, each verified on the car it names.
 - Freeze-frame data (service 02) and the readiness monitors of PID 01.
 - Headers on (`ATH1`), to tell which ECU answered.
 - Faster monitoring: several PIDs per request on CAN, and the expected reply count after a request.

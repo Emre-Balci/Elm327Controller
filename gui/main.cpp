@@ -48,7 +48,7 @@ constexpr std::int32_t kExitSuccess{0};
 constexpr std::int32_t kExitFailure{1};
 constexpr std::int32_t kExitUsage{2};
 
-constexpr std::array<std::string_view, 23U> kUsage{{
+constexpr std::array<std::string_view, 25U> kUsage{{
     "Usage: elm327gui [options]",
     "",
     "Graphical front-end for ELM327 OBD-II adapters: live data with plots, trouble codes, the VIN,",
@@ -64,7 +64,9 @@ constexpr std::array<std::string_view, 23U> kUsage{{
     "  -i, --interval MS     time between the samples of the monitor (default 1000)",
     "  -w, --widgets         widget mode: the live data as the gauges of a dashboard",
     "  -r, --read-only       safe mode: refuse anything that could change the vehicle",
-    "      --tab NAME        open the tab live, codes, vehicle, terminal or expert",
+    "      --tab NAME        open the tab live, codes, vehicle, features, terminal or expert",
+    "      --features FILE   the definitions of the Features tab (default: features.ini in",
+    "                        ~/.config/elm327controller)",
     "      --screenshot FILE save the window as a PPM image once it is idle, then exit",
     "  -h, --help            show this help",
     "      --version         show the version",
@@ -100,6 +102,7 @@ constexpr std::uint64_t kMaxFrames{std::numeric_limits<std::uint64_t>::max()};
 struct Arguments final {
     StartOptions start{};
     const char* screenshot{nullptr};
+    const char* features{nullptr};  ///< --features: the user's definitions for the Features tab.
     bool help{false};
     bool version{false};
 };
@@ -163,6 +166,8 @@ bool parse_tab(const std::string_view text, Tab& tab) noexcept {
         tab = Tab::kVehicle;
     } else if (text == "terminal") {
         tab = Tab::kTerminal;
+    } else if (text == "features") {
+        tab = Tab::kFeatures;
     } else if (text == "expert") {
         tab = Tab::kExpert;
     } else {
@@ -181,7 +186,7 @@ bool apply_option(const std::string_view name, const char* const value, Argument
     const bool takes_value{(name == "-d") || (name == "--device") || (name == "-b") || (name == "--baud") ||
                            (name == "-p") || (name == "--protocol") || (name == "-t") || (name == "--timeout") ||
                            (name == "-m") || (name == "--monitor") || (name == "-i") || (name == "--interval") ||
-                           (name == "--tab") || (name == "--screenshot")};
+                           (name == "--tab") || (name == "--screenshot") || (name == "--features")};
     if (takes_value && (value == nullptr)) {
         print_error("option needs a value", name);
         valid = false;
@@ -225,8 +230,10 @@ bool apply_option(const std::string_view name, const char* const value, Argument
     } else if (name == "--tab") {
         valid = parse_tab(text, start.tab);
         if (!valid) {
-            print_error("unknown tab (live, codes, vehicle, terminal or expert)", text);
+            print_error("unknown tab (live, codes, vehicle, features, terminal or expert)", text);
         }
+    } else if (name == "--features") {
+        arguments.features = value;
     } else if (name == "--screenshot") {
         arguments.screenshot = value;
     } else if ((name == "-c") || (name == "--connect")) {
@@ -308,11 +315,65 @@ common::Status save_screenshot(const char* const path, const int width, const in
     return is_ok(status) ? closed : status;
 }
 
+/// The largest definitions file of the Features tab.
+constexpr std::size_t kMaxDefinitions{64U * 1024U};
+
+/// Gives the Features tab its definitions: the simulator's, built in, then the user's file, from
+/// --features or features.ini in the configuration directory. A problem with the user's file is
+/// shown in the tab, and told on stderr.
+void load_definitions(const Arguments& arguments, elm327::gui::App& app) noexcept {
+    // Static: the list and the text of the file are large, and loaded once.
+    static elm327::expert::FeatureList features{};
+    static std::array<std::uint8_t, kMaxDefinitions> buffer{};
+    features.clear();
+    elm327::expert::FeatureParseError error{};
+    // Cannot fail: the tests parse the built-in definitions.
+    static_cast<void>(elm327::expert::parse_features(span_of(elm327::gui::simulator_features()), features, error));
+    const std::size_t built_in{features.size()};
+    elm327::gui::Path directory{};
+    const bool have_directory{is_ok(elm327::gui::config_directory(directory))};
+    elm327::gui::Path path{};
+    if (arguments.features != nullptr) {
+        static_cast<void>(path.append(std::string_view{arguments.features}));
+    } else if (have_directory) {
+        static_cast<void>(path.append(directory.text()) && path.append("/features.ini"));
+    } else {
+        // Without a home directory there is no file to look for.
+    }
+    common::StaticString<256U> source{};
+    common::StaticString<256U> problem{};
+    static_cast<void>(common::append_unsigned(source, built_in) && source.append(" built in for elm327sim"));
+    if (!path.empty()) {
+        const common::Status status{elm327::gui::load_features(path.c_str(), buffer, features, error)};
+        if (is_ok(status)) {
+            static_cast<void>(source.append(", ") && common::append_unsigned(source, features.size() - built_in) &&
+                              source.append(" from ") && source.append(path.text()));
+        } else if ((status == common::Status::kNotFound) && (arguments.features == nullptr)) {
+            // The default file does not exist yet: say where it goes.
+            static_cast<void>(source.append("; yours go in ") && source.append(path.text()));
+        } else {
+            static_cast<void>(problem.append(path.text()) && problem.append(": "));
+            if (error.line > 0U) {
+                static_cast<void>(problem.append("line ") && common::append_unsigned(problem, error.line) &&
+                                  problem.append(": ") && problem.append(error.message.text()));
+            } else {
+                static_cast<void>(problem.append(std::string_view{common::to_string(status)}));
+            }
+            write_text(STDERR_FILENO, "elm327gui: ");
+            write_text(STDERR_FILENO, problem.view());
+            write_text(STDERR_FILENO, "\n");
+        }
+    }
+    app.set_features(features, source.view(), problem.view(),
+                     have_directory ? directory.view() : std::string_view{});
+}
+
 /// Runs the window until it is closed. @return the exit code.
 std::int32_t run_window(const Arguments& arguments, elm327::StopSignals& stop) noexcept {
     // The worker and the app embed large buffers: static storage, not the stack.
     static elm327::gui::Worker worker{};
     static elm327::gui::App app{worker};
+    load_definitions(arguments, app);
     std::int32_t exit_code{kExitFailure};
     static_cast<void>(glfwSetErrorCallback(&report_glfw_error));
     if (glfwInit() == GLFW_TRUE) {

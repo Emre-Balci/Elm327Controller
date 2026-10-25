@@ -227,6 +227,40 @@ common::Result<HexBytes> parse_bytes(const std::string_view text) noexcept {
                              : common::Result<HexBytes>::failure(count.status());
 }
 
+// The Features tab.
+
+/// What to show as the state of a feature: the state of its last reading or, when a change was
+/// refused or failed before anything was written, the state of the value read first.
+expert::FeatureState shown_state(const expert::Feature& feature, const expert::FeatureReading& reading) noexcept {
+    expert::FeatureState state{reading.state};
+    const bool known{(state == expert::FeatureState::kOn) || (state == expert::FeatureState::kOff) ||
+                     (state == expert::FeatureState::kOther)};
+    if ((!known) && reading.written.empty() && (reading.value.size() == feature.length)) {
+        const common::Span<const std::uint8_t> value{reading.value.data(), reading.value.size()};
+        state = expert::feature_state(feature, value);
+    }
+    return state;
+}
+
+/// The codes behind @p feature, for the curious: its module, how it is recognised, and its setting.
+Text feature_details(const expert::Feature& feature) noexcept {
+    Text text{};
+    static_cast<void>(text.append("Module ") && text.append(feature.request.text()) &&
+                      text.append(" (replies from ") && text.append(feature.reply.text()) && text.append(")"));
+    if (feature.part_numbers.empty()) {
+        static_cast<void>(text.append(", any part number"));
+    } else {
+        static_cast<void>(text.append(", part number ") && text.append(feature.part_numbers[0U].text()) &&
+                          text.append("*"));
+    }
+    static_cast<void>(text.append("; setting: DID ") && common::append_hex(text, feature.did, 4U) &&
+                      text.append(", byte ") && common::append_unsigned(text, std::uint32_t{feature.byte}) &&
+                      text.append(", bits ") && common::append_hex(text, feature.mask, 2U) &&
+                      text.append(" (on ") && common::append_hex(text, feature.on, 2U) && text.append(", off ") &&
+                      common::append_hex(text, feature.off, 2U) && text.append(")."));
+    return text;
+}
+
 /// A request of the expert tab for the worker: the UDS request @p command, for what @p label says.
 Request make_uds_request(const std::string_view label, const std::string_view command) noexcept {
     Request request{};
@@ -374,6 +408,10 @@ void App::draw() noexcept {
                     draw_vehicle();
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem("Features", nullptr, tab_flags(Tab::kFeatures))) {
+                    draw_features();
+                    ImGui::EndTabItem();
+                }
                 if (ImGui::BeginTabItem("Terminal", nullptr, tab_flags(Tab::kTerminal))) {
                     draw_terminal();
                     ImGui::EndTabItem();
@@ -396,11 +434,18 @@ void App::take_results() noexcept {
     static_cast<void>(worker_->update_state());
     const State& state{worker_->state()};
     if (!state.connected) {
-        // The next connection reads the codes and the VIN again when their tabs open, and widget
-        // mode starts its monitor again.
+        // The next connection reads the codes, the VIN and the features again when their tabs
+        // open, and widget mode starts its monitor again. A backup belongs to the car it was read
+        // from, so it ends with the connection.
         dtcs_requested_ = false;
         vin_requested_ = false;
         dashboard_started_ = false;
+        features_requested_ = false;
+        forget_feature_requests();
+        for (FeatureView& view : feature_views_) {
+            view.checked = false;
+            view.has_backup = false;
+        }
     }
     if (state.monitoring) {
         dashboard_started_ = true;
@@ -425,6 +470,19 @@ void App::take_results() noexcept {
     UdsResult result{};
     for (std::size_t count{0U}; (count < Worker::kUdsCapacity) && worker_->take_uds_result(result); ++count) {
         log_uds(result);
+    }
+    FeatureResult feature{};
+    for (std::size_t count{0U}; (count < Worker::kFeatureCapacity) && worker_->take_feature_result(feature); ++count) {
+        take_feature(feature);
+    }
+    // The checks that are due go out as far as the worker's queue takes them; the rest next frame.
+    bool posted{state.connected};
+    for (std::size_t count{0U}; posted && (check_next_ < features_.size()) && (count < expert::kMaxFeatures);
+         ++count) {
+        posted = post_feature(RequestKind::kFeatureRead, check_next_, false);
+        if (posted) {
+            ++check_next_;
+        }
     }
 }
 
@@ -519,6 +577,7 @@ void App::draw_connection() noexcept {
         ImGui::SameLine();
         if (ImGui::Button("Cancel")) {
             worker_->cancel();
+            forget_feature_requests();  // The worker drops them: their results do not come.
         }
     }
 
@@ -886,6 +945,227 @@ void App::draw_vehicle() noexcept {
             show(values[index]);
         }
         ImGui::EndTable();
+    }
+}
+
+void App::draw_features() noexcept {
+    const State& state{worker_->state()};
+    // Checked once without a click when the tab opens: reading the features changes nothing.
+    if (state.connected && (!features_requested_) && (!is_busy(state)) && (!features_.empty())) {
+        check_features();
+    }
+    if (state.read_only) {
+        show_wrapped(kGreen, "Read-only mode is on: you can see which features are on, but not change them.");
+    } else {
+        show_wrapped("Turn features of your car on and off. Before each change the setting is saved, so that Undo "
+                     "can put it back; the backups are kept in a file too.");
+    }
+    ImGui::BeginDisabled((!state.connected) || is_busy(state) || features_.empty());
+    if (ImGui::Button("Check again")) {
+        check_features();
+    }
+    ImGui::EndDisabled();
+    tooltip("Reads the state of every feature again. Reading changes nothing.");
+    ImGui::SameLine();
+    static_cast<void>(ImGui::Checkbox("Hide what this car does not have", &hide_absent_));
+    if (!state.connected) {
+        ImGui::SameLine();
+        show_disabled("Connect to the adapter to see the features of your car.");
+    }
+    show_note(features_source_.view());
+    if (!features_problem_.empty()) {
+        show_wrapped(kRed, features_problem_.text());
+    }
+    const float font{ImGui::GetFontSize()};
+    if (ImGui::BeginChild("features", ImVec2{0.0F, 0.0F})) {
+        const auto absent = [this](const std::size_t index) noexcept {
+            const FeatureView& view{feature_views_[index]};
+            const expert::FeatureState now{view.reading.state};
+            return hide_absent_ && view.checked &&
+                   ((now == expert::FeatureState::kNotThisEcu) || (now == expert::FeatureState::kNoAnswer));
+        };
+        std::size_t hidden{0U};
+        // By group, in the order the groups first appear in the definitions.
+        for (std::size_t first{0U}; first < features_.size(); ++first) {
+            const std::string_view group{features_[first].group.view()};
+            bool new_group{true};
+            for (std::size_t before{0U}; new_group && (before < first); ++before) {
+                new_group = features_[before].group.view() != group;
+            }
+            std::size_t shown{0U};
+            for (std::size_t index{first}; new_group && (index < features_.size()); ++index) {
+                if (features_[index].group.view() == group) {
+                    if (absent(index)) {
+                        ++hidden;
+                    } else {
+                        ++shown;
+                    }
+                }
+            }
+            if (shown > 0U) {
+                ImGui::SeparatorText(group.empty() ? "Features" : features_[first].group.c_str());
+                ImGui::PushID(static_cast<int>(first));
+                const ImGuiTableFlags flags{ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerH |
+                                            ImGuiTableFlags_PadOuterX};
+                if (ImGui::BeginTable("group", 3, flags)) {
+                    ImGui::TableSetupColumn("Feature", ImGuiTableColumnFlags_WidthStretch);
+                    ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, font * 14.0F);
+                    ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, font * 9.5F);
+                    for (std::size_t index{first}; index < features_.size(); ++index) {
+                        if ((features_[index].group.view() == group) && (!absent(index))) {
+                            draw_feature(index, state);
+                        }
+                    }
+                    ImGui::EndTable();
+                }
+                ImGui::PopID();
+            }
+        }
+        if (hidden > 0U) {
+            Text text{};
+            static_cast<void>(common::append_unsigned(text, hidden) &&
+                              text.append((hidden == 1U) ? " feature of the list is not on this car, and hidden."
+                                                         : " features of the list are not on this car, and hidden."));
+            ImGui::Spacing();
+            show_note(text.view());
+        }
+        if (features_.empty()) {
+            show_note("No features are defined. Add definitions for your car to features.ini in the configuration "
+                      "directory; the README tells how.");
+        }
+    }
+    ImGui::EndChild();
+    draw_feature_confirmation();
+}
+
+void App::draw_feature(const std::size_t index, const State& state) noexcept {
+    const expert::Feature& feature{features_[index]};
+    const FeatureView& view{feature_views_[index]};
+    const expert::FeatureState now{shown_state(feature, view.reading)};
+    const bool known{view.checked && ((now == expert::FeatureState::kOn) || (now == expert::FeatureState::kOff) ||
+                                      (now == expert::FeatureState::kOther))};
+    const bool can_change{state.connected && (!state.read_only) && (!is_busy(state)) && (!view.busy)};
+    ImGui::PushID(static_cast<int>(index));
+    ImGui::TableNextRow();
+    static_cast<void>(ImGui::TableNextColumn());
+    show(feature.name.view());
+    tooltip(feature_details(feature).view());
+    if (!feature.about.empty()) {
+        show_note(feature.about.view());
+    }
+
+    static_cast<void>(ImGui::TableNextColumn());
+    if (view.busy) {
+        show(kYellow, "working...");
+    } else if (!view.checked) {
+        show_disabled("not checked");
+    } else {
+        switch (now) {
+            case expert::FeatureState::kOn:
+                show(kGreen, "On");
+                break;
+            case expert::FeatureState::kOff:
+                show("Off");
+                break;
+            case expert::FeatureState::kOther:
+                show(kYellow, "Another value");
+                break;
+            case expert::FeatureState::kNotThisEcu:
+            case expert::FeatureState::kNoAnswer:
+                show_disabled("Not on this car");
+                break;
+            case expert::FeatureState::kNeedsUnlock:
+                show(kYellow, "Locked");
+                break;
+            case expert::FeatureState::kRefused:
+            case expert::FeatureState::kFailed:
+                show(kRed, "Unknown");
+                break;
+        }
+        // Why, or what happened: e.g. read-only mode, a locked module, "It is on already."
+        const expert::FeatureState outcome{view.reading.state};
+        if (!view.reading.reason.empty()) {
+            const bool refused{(outcome == expert::FeatureState::kRefused) ||
+                               (outcome == expert::FeatureState::kNeedsUnlock)};
+            const ImVec4 color{(outcome == expert::FeatureState::kFailed)
+                                   ? kRed
+                                   : (refused ? kYellow : ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled))};
+            show_wrapped(color, view.reading.reason.text());
+        }
+    }
+
+    static_cast<void>(ImGui::TableNextColumn());
+    const bool on{now == expert::FeatureState::kOn};
+    ImGui::BeginDisabled((!can_change) || (!known));
+    if (ImGui::Button(on ? "Turn off" : "Turn on")) {
+        confirm_index_ = index;
+        confirm_on_ = !on;
+        confirm_undo_ = false;
+        open_feature_confirmation_ = true;
+    }
+    ImGui::EndDisabled();
+    if (state.read_only) {
+        tooltip("Read-only mode is on: turn it off in the bar above to change features.");
+    }
+    if (view.has_backup) {
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!can_change);
+        if (ImGui::Button("Undo")) {
+            confirm_index_ = index;
+            confirm_undo_ = true;
+            open_feature_confirmation_ = true;
+        }
+        ImGui::EndDisabled();
+        tooltip("Puts the setting back to what it was before your first change.");
+    }
+    ImGui::PopID();
+}
+
+void App::draw_feature_confirmation() noexcept {
+    constexpr const char* kTitle{"Change a feature"};
+    if (open_feature_confirmation_) {
+        ImGui::OpenPopup(kTitle);
+        open_feature_confirmation_ = false;
+    }
+    // Always in the middle of the window, also when it opens before the window has its size.
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Always, ImVec2{0.5F, 0.5F});
+    if (ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        const float font{ImGui::GetFontSize()};
+        const bool valid{confirm_index_ < features_.size()};
+        const expert::Feature& feature{features_[valid ? confirm_index_ : 0U]};
+        if (valid) {
+            ImGui::PushTextWrapPos(font * 30.0F);
+            const std::string_view verb{confirm_undo_ ? "Undo the change of '"
+                                                      : (confirm_on_ ? "Turn on '" : "Turn off '")};
+            Text question{};
+            static_cast<void>(question.append(verb) && question.append(feature.name.text()) && question.append("'?"));
+            show(question.text());
+            if (!feature.about.empty()) {
+                show_note(feature.about.view());
+            }
+            ImGui::Spacing();
+            show(confirm_undo_ ? "The setting goes back to the value it had before your first change."
+                               : "The setting is saved first, so that Undo can put it back.");
+            if (!feature.note.empty()) {
+                show(kYellow, feature.note.view());
+            }
+            show_note("Change features with the car standing and the ignition on.");
+            ImGui::PopTextWrapPos();
+            ImGui::Spacing();
+        }
+        const char* const action{confirm_undo_ ? "Undo" : (confirm_on_ ? "Turn on" : "Turn off")};
+        ImGui::BeginDisabled(!valid);
+        if (ImGui::Button(action, ImVec2{font * 7.0F, 0.0F})) {
+            static_cast<void>(post_feature(confirm_undo_ ? RequestKind::kFeatureRestore : RequestKind::kFeatureChange,
+                                           confirm_index_, confirm_on_));
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2{font * 7.0F, 0.0F})) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 }
 
@@ -1357,6 +1637,87 @@ void App::send_command() noexcept {
         static_cast<void>(worker_->post(request));
         command_[0U] = '\0';
         scroll_log_ = true;
+    }
+}
+
+void App::set_features(const expert::FeatureList& features, const std::string_view source,
+                       const std::string_view problem, const std::string_view log_directory) noexcept {
+    features_ = features;
+    features_source_.clear();
+    static_cast<void>(features_source_.append(source));
+    features_problem_.clear();
+    static_cast<void>(features_problem_.append(problem));
+    log_directory_.clear();
+    static_cast<void>(log_directory_.append(log_directory));
+    feature_views_ = std::array<FeatureView, expert::kMaxFeatures>{};
+    check_next_ = features_.size();
+    features_requested_ = false;
+}
+
+void App::check_features() noexcept {
+    features_requested_ = true;
+    check_next_ = 0U;  // take_results() posts the checks.
+}
+
+bool App::post_feature(const RequestKind kind, const std::size_t index, const bool on) noexcept {
+    bool posted{false};
+    if (index < features_.size()) {
+        Request request{};
+        request.kind = kind;
+        request.feature = features_[index];
+        request.feature_index = static_cast<std::uint16_t>(index);
+        request.feature_on = on;
+        if (kind == RequestKind::kFeatureRestore) {
+            request.backup = feature_views_[index].backup;
+        }
+        posted = worker_->post(request);
+        if (posted) {
+            feature_views_[index].busy = true;
+        }
+    }
+    return posted;
+}
+
+void App::take_feature(const FeatureResult& result) noexcept {
+    const std::size_t index{result.index};
+    if (index < features_.size()) {
+        FeatureView& view{feature_views_[index]};
+        const expert::FeatureReading& reading{result.reading};
+        view.busy = false;
+        view.checked = true;
+        view.reading = reading;
+        const bool written{!reading.written.empty()};
+        const bool undo{result.kind == RequestKind::kFeatureRestore};
+        if (written && (!undo) && (!view.has_backup)) {
+            // The value before the first change of this connection: what Undo puts back.
+            view.has_backup = true;
+            view.backup = reading.value;
+        } else if (written && undo) {
+            view.has_backup = false;
+        } else {
+            // Nothing was written, or a later change: the first backup stays.
+        }
+        // Every write goes to the backup file too, so that it can be undone after the program ends.
+        if (written && (!log_directory_.empty())) {
+            const common::Status logged{log_change(
+                log_directory_.c_str(), features_[index], undo,
+                common::Span<const std::uint8_t>{reading.value.data(), reading.value.size()},
+                common::Span<const std::uint8_t>{reading.written.data(), reading.written.size()})};
+            if (!is_ok(logged)) {
+                features_problem_.clear();
+                static_cast<void>(features_problem_.append("The change could not be recorded in ") &&
+                                  features_problem_.append(log_directory_.text()) &&
+                                  features_problem_.append("/backups.txt: ") &&
+                                  features_problem_.append(std::string_view{common::to_string(logged)}));
+            }
+        }
+    }
+}
+
+void App::forget_feature_requests() noexcept {
+    check_next_ = features_.size();
+    for (FeatureView& view : feature_views_) {
+        view.busy = false;
     }
 }
 

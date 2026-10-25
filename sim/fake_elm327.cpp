@@ -106,15 +106,20 @@ std::string protocol_name(const char protocol) {
 bool is_accepted_setting(const std::string& name) {
     static const std::set<std::string> kSettings{"D", "H0", "H1", "M0", "M1", "AT0", "AT1", "AT2", "CAF0", "CAF1"};
     const bool timeout{(name.size() == 4U) && (name.compare(0U, 2U, "ST") == 0)};  // ATST hh.
-    // The CAN addressing of expert mode: the header (ATSH), the receive filter (ATCRA, or ATCRA
-    // alone to reset it) and the flow control (ATFCSH, ATFCSD, ATFCSM). The simulated ECU answers
-    // whatever address is set.
-    const std::array<std::string_view, 5U> kAddressing{{"SH", "CRA", "FCSH", "FCSD", "FCSM"}};
+    // The CAN addressing of expert mode and of the features: the header (ATSH, and ATCP for the
+    // priority of 29-bit identifiers), the receive filter (ATCRA, or ATCRA alone to reset it), the
+    // flow control (ATFCSH, ATFCSD, ATFCSM) and extended addressing (ATCEA). The header decides
+    // which module answers (see Vehicle::modules); the others have no effect here.
+    const std::array<std::string_view, 7U> kAddressing{{"SH", "CP", "CRA", "FCSH", "FCSD", "FCSM", "CEA"}};
     bool addressing{false};
     for (const std::string_view prefix : kAddressing) {
         addressing = addressing || (name.compare(0U, prefix.size(), prefix) == 0);
     }
     return timeout || addressing || (kSettings.count(name) > 0U);
+}
+
+std::vector<std::uint8_t> ascii(const std::string& text) {
+    return std::vector<std::uint8_t>{text.begin(), text.end()};
 }
 
 }  // namespace
@@ -158,6 +163,24 @@ Vehicle example_vehicle() {
         {0xF190U, vin_bytes},  // VIN, read with 'uds read F190' (multi-frame on CAN).
         {0x0407U, {0x00U}},    // An example one-byte coding block, writable with 'uds write 0407 ..'.
     };
+    // Two more modules, for the features: each tells its part number (F187) and keeps a coding
+    // (0600) that only changes in the extended session; the cluster also has a locked setting.
+    vehicle.modules = {
+        {"714",  // Instrument cluster; replies from 77E.
+         {
+             {0xF187U, ascii("SIM-CLUSTER-01")},
+             {0x0600U, {0x12U, 0x00U, 0x40U, 0x00U}},  // Needle sweep off (byte 0 bit 0), digital speed on.
+             {0x0601U, {0x00U}},                       // Needs security access.
+         }},
+        {"70E",  // Body control module; replies from 778.
+         {
+             {0xF187U, ascii("SIM-BCM-02")},
+             {0x0600U, {0x00U, 0x08U, 0x00U}},  // Mirrors fold off (byte 0 bit 1), daytime lights on.
+             {0x0410U, {0x03U}},                // Comfort turn signal: 3 flashes.
+         }},
+    };
+    vehicle.session_protected_dids = {0x0600U, 0x0410U};
+    vehicle.locked_dids = {0x0601U};
     return vehicle;
 }
 
@@ -193,6 +216,23 @@ void FakeElm327::set_pid(const std::uint8_t pid, std::vector<std::uint8_t> data)
 std::vector<std::string> FakeElm327::commands() const {
     const std::lock_guard<std::mutex> lock{mutex_};
     return commands_;
+}
+
+std::vector<std::uint8_t> FakeElm327::did_value(const std::string& header, const std::uint16_t did) const {
+    const std::lock_guard<std::mutex> lock{mutex_};
+    const std::map<std::uint16_t, std::vector<std::uint8_t>>* dids{&vehicle_.data_by_identifier};
+    if (!header.empty()) {
+        const auto module = vehicle_.modules.find(header);
+        dids = (module != vehicle_.modules.end()) ? &module->second : nullptr;
+    }
+    std::vector<std::uint8_t> value{};
+    if (dids != nullptr) {
+        const auto entry = dids->find(did);
+        if (entry != dids->end()) {
+            value = entry->second;
+        }
+    }
+    return value;
 }
 
 void FakeElm327::hang_up() {
@@ -303,6 +343,8 @@ std::vector<std::string> FakeElm327::at_command(const std::string& command) {
         connected_ = false;  // Protocol close.
     } else if (!is_accepted_setting(name)) {
         lines = {"?"};
+    } else if (name.compare(0U, 2U, "SH") == 0) {
+        header_ = name.substr(2U);  // Decides which module answers UDS requests.
     } else {
         // A setting without effect here.
     }
@@ -393,9 +435,12 @@ std::vector<std::vector<std::uint8_t>> FakeElm327::vehicle_messages(const std::v
 
 std::vector<std::vector<std::uint8_t>> FakeElm327::uds_messages(const std::vector<std::uint8_t>& request) {
     std::vector<std::vector<std::uint8_t>> messages{};
+    std::map<std::uint16_t, std::vector<std::uint8_t>>* const dids{addressed_module()};
     const std::uint8_t service{request[0U]};
     const std::uint8_t positive{static_cast<std::uint8_t>(service + 0x40U)};
-    if (service == 0x3EU) {
+    if (dids == nullptr) {
+        // No module listens to this header: "NO DATA", as when it is not fitted.
+    } else if (service == 0x3EU) {
         // TesterPresent: a positive reply, unless the suppress-positive-response bit asks for none
         // (the adapter then reports "NO DATA", as with a real ECU).
         const std::uint8_t sub{(request.size() >= 2U) ? request[1U] : std::uint8_t{0U}};
@@ -404,14 +449,16 @@ std::vector<std::vector<std::uint8_t>> FakeElm327::uds_messages(const std::vecto
         }
     } else if ((service == 0x10U) && (request.size() == 2U)) {
         // DiagnosticSessionControl: echo the session and some timing parameters.
+        session_ = request[1U];
         messages.push_back({positive, request[1U], 0x00U, 0x32U, 0x01U, 0xF4U});
     } else if ((service == 0x11U) && (request.size() == 2U)) {
-        messages.push_back({positive, request[1U]});  // ECUReset.
+        session_ = 0x01U;  // ECUReset: the module starts again in the default session.
+        messages.push_back({positive, request[1U]});
     } else if ((service == 0x22U) && (request.size() == 3U)) {
         const std::uint16_t did{
             static_cast<std::uint16_t>((static_cast<std::uint16_t>(request[1U]) << 8U) | request[2U])};
-        const auto entry = vehicle_.data_by_identifier.find(did);
-        if (entry != vehicle_.data_by_identifier.end()) {
+        const auto entry = dids->find(did);
+        if (entry != dids->end()) {
             std::vector<std::uint8_t> message{positive, request[1U], request[2U]};
             message.insert(message.end(), entry->second.begin(), entry->second.end());
             messages.push_back(message);
@@ -422,8 +469,14 @@ std::vector<std::vector<std::uint8_t>> FakeElm327::uds_messages(const std::vecto
         // WriteDataByIdentifier: store the new value so a later read shows it changed.
         const std::uint16_t did{
             static_cast<std::uint16_t>((static_cast<std::uint16_t>(request[1U]) << 8U) | request[2U])};
-        vehicle_.data_by_identifier[did] = std::vector<std::uint8_t>{request.begin() + 3, request.end()};
-        messages.push_back({positive, request[1U], request[2U]});
+        if (vehicle_.locked_dids.count(did) > 0U) {
+            messages.push_back({0x7FU, service, 0x33U});  // securityAccessDenied.
+        } else if ((vehicle_.session_protected_dids.count(did) > 0U) && (session_ == 0x01U)) {
+            messages.push_back({0x7FU, service, 0x7FU});  // serviceNotSupportedInActiveSession.
+        } else {
+            (*dids)[did] = std::vector<std::uint8_t>{request.begin() + 3, request.end()};
+            messages.push_back({positive, request[1U], request[2U]});
+        }
     } else if ((service == 0x31U) && (request.size() >= 4U)) {
         messages.push_back({positive, request[1U], request[2U], request[3U]});  // RoutineControl.
     } else if ((service == 0x27U) && (request.size() >= 2U)) {
@@ -437,6 +490,19 @@ std::vector<std::vector<std::uint8_t>> FakeElm327::uds_messages(const std::vecto
         messages.push_back({0x7FU, service, 0x13U});  // incorrectMessageLengthOrInvalidFormat.
     }
     return messages;
+}
+
+std::map<std::uint16_t, std::vector<std::uint8_t>>* FakeElm327::addressed_module() {
+    std::map<std::uint16_t, std::vector<std::uint8_t>>* dids{nullptr};
+    if (header_.empty() || (header_ == "7DF") || (header_ == "7E0")) {
+        dids = &vehicle_.data_by_identifier;  // The engine module, also through the functional address.
+    } else {
+        const auto module = vehicle_.modules.find(header_);
+        if (module != vehicle_.modules.end()) {
+            dids = &module->second;
+        }
+    }
+    return dids;
 }
 
 std::vector<std::uint8_t> FakeElm327::support_bitmap(const std::uint8_t base) const {
@@ -583,6 +649,7 @@ void FakeElm327::reset() {
     linefeeds_ = behaviour_.linefeeds;
     spaces_ = true;
     connected_ = false;
+    header_.clear();  // The modules keep their session: a reset of the adapter does not reach them.
 }
 
 void FakeElm327::send(const std::string& text) const {

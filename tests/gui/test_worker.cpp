@@ -10,6 +10,8 @@
 #include "common/core/status.hpp"
 #include "common/time/clock.hpp"
 #include "elm327/obd/dtc.hpp"
+#include "elm327/expert/feature.hpp"
+#include "gui/features.hpp"
 #include "gui/worker.hpp"
 #include "sim/fake_elm327.hpp"
 #include "test_framework.hpp"
@@ -457,4 +459,98 @@ TEST_CASE(worker_raw_reports_adapter_errors) {
     CHECK(worker->state().message_failed);
     CHECK(worker->state().message.view() == "ATXYZ: ?");
     CHECK(has_line(trace_of(*worker), "ATSH7E0"));
+}
+
+namespace {
+
+using elm327::gui::FeatureResult;
+
+/// The built-in definitions of the simulated car.
+elm327::expert::FeatureList simulator_features() {
+    elm327::expert::FeatureList features{};
+    elm327::expert::FeatureParseError error{};
+    static_cast<void>(
+        elm327::expert::parse_features(test::span_of(elm327::gui::simulator_features()), features, error));
+    return features;
+}
+
+Request feature_request(const RequestKind kind, const elm327::expert::Feature& feature, const std::uint16_t index,
+                        const bool on) {
+    Request request{};
+    request.kind = kind;
+    request.feature = feature;
+    request.feature_index = index;
+    request.feature_on = on;
+    return request;
+}
+
+/// Posts @p request and waits up to 10 s for its FeatureResult, and for the State published after it.
+bool run_feature(Worker& worker, const Request& request, FeatureResult& result) {
+    static_cast<void>(worker.update_state());
+    const std::uint64_t before{worker.state().version};
+    bool done{worker.post(request)};
+    const common::TimePoint deadline{common::MonotonicClock::now() + 10s};
+    bool taken{false};
+    while (done && (!taken) && (common::MonotonicClock::now() < deadline)) {
+        taken = worker.take_feature_result(result);
+        if (!taken) {
+            std::this_thread::sleep_for(2ms);
+        }
+    }
+    // The state, with the message of a change, is published right after the result: the first idle
+    // state after the request began.
+    return taken && wait_for(worker, [before](const State& state) { return (state.version > before) && idle(state); });
+}
+
+}  // namespace
+
+TEST_CASE(worker_features) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const auto worker = std::make_unique<Worker>();
+    REQUIRE(connect_worker(*worker, fake));
+    const elm327::expert::FeatureList features{simulator_features()};
+    REQUIRE(features.size() == 5U);
+
+    FeatureResult result{};
+    REQUIRE(run_feature(*worker, feature_request(RequestKind::kFeatureRead, features[0U], 0U, false), result));
+    CHECK(result.kind == RequestKind::kFeatureRead);
+    CHECK(result.index == 0U);
+    CHECK(result.reading.state == elm327::expert::FeatureState::kOff);
+
+    REQUIRE(run_feature(*worker, feature_request(RequestKind::kFeatureChange, features[0U], 0U, true), result));
+    CHECK(result.kind == RequestKind::kFeatureChange);
+    CHECK(result.reading.state == elm327::expert::FeatureState::kOn);
+    CHECK(result.reading.written.size() == 4U);
+    CHECK(worker->state().message.view() == "Needle sweep: turned on.");
+    CHECK(!worker->state().message_failed);
+    CHECK(fake.did_value("714", 0x0600U) == std::vector<std::uint8_t>({0x13U, 0x00U, 0x40U, 0x00U}));
+
+    // Undo: the window sends the value read before the change.
+    Request undo{feature_request(RequestKind::kFeatureRestore, features[0U], 0U, false)};
+    undo.backup = result.reading.value;
+    REQUIRE(run_feature(*worker, undo, result));
+    CHECK(result.kind == RequestKind::kFeatureRestore);
+    CHECK(result.reading.state == elm327::expert::FeatureState::kOff);
+    CHECK(worker->state().message.view() == "Needle sweep: restored.");
+    CHECK(fake.did_value("714", 0x0600U) == std::vector<std::uint8_t>({0x12U, 0x00U, 0x40U, 0x00U}));
+}
+
+TEST_CASE(worker_features_read_only) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const auto worker = std::make_unique<Worker>();
+    REQUIRE(connect_worker(*worker, fake, true));
+    const elm327::expert::FeatureList features{simulator_features()};
+    REQUIRE(features.size() == 5U);
+
+    FeatureResult result{};
+    REQUIRE(run_feature(*worker, feature_request(RequestKind::kFeatureChange, features[0U], 0U, true), result));
+    CHECK(result.reading.state == elm327::expert::FeatureState::kRefused);
+    CHECK(result.reading.written.empty());
+    CHECK(worker->state().message.view() == "Needle sweep: Read-only mode is on: nothing was changed.");
+    CHECK(worker->state().message_failed);
+    worker->stop();
+    CHECK(!received(fake, "2E"));
+    CHECK(!received(fake, "10"));
 }

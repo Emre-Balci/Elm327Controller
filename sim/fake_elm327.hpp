@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,10 +39,21 @@ struct Vehicle final {
     std::vector<std::uint16_t> stored_dtcs{};
     std::vector<std::uint16_t> pending_dtcs{};
     std::vector<std::uint16_t> permanent_dtcs{};
-    /// UDS data identifiers (service 22/2E), e.g. 0xF190 (VIN) or an example coding block. A
-    /// WriteDataByIdentifier changes the value here, which lets a test confirm a write took effect,
-    /// and that in read-only mode no write ever arrived.
+    /// UDS data identifiers (service 22/2E) of the engine module, which answers the default header
+    /// (none, 7DF or 7E0), e.g. 0xF190 (VIN) or an example coding block. A WriteDataByIdentifier
+    /// changes the value here, which lets a test confirm a write took effect, and that in read-only
+    /// mode no write ever arrived.
     std::map<std::uint16_t, std::vector<std::uint8_t>> data_by_identifier{};
+    /// The other modules, by the CAN identifier they listen to (ATSH, upper case), e.g. "714" for the
+    /// instrument cluster, with their data identifiers. UDS requests to any other header get no
+    /// answer ("NO DATA"), as when a module is not fitted.
+    std::map<std::string, std::map<std::uint16_t, std::vector<std::uint8_t>>> modules{};
+    /// DIDs whose write needs a non-default diagnostic session (10 03), like a coding; in the default
+    /// session a write is refused with serviceNotSupportedInActiveSession (7F).
+    std::set<std::uint16_t> session_protected_dids{};
+    /// DIDs whose write needs security access, which the simulator never grants: a write is refused
+    /// with securityAccessDenied (33).
+    std::set<std::uint16_t> locked_dids{};
     std::string vin{};
     /// The reply to ATRV.
     std::string voltage{"12.6V"};
@@ -92,6 +104,10 @@ public:
     /// The commands received so far, in upper case without spaces, e.g. "ATZ" or "010C".
     [[nodiscard]] std::vector<std::string> commands() const;
 
+    /// The value of data identifier @p did of the module at @p header ("" for the engine module);
+    /// empty if there is none.
+    [[nodiscard]] std::vector<std::uint8_t> did_value(const std::string& header, std::uint16_t did) const;
+
     /// Removes the pseudo-terminal: for the program that has it open, the device disappears.
     void hang_up();
 
@@ -103,6 +119,8 @@ private:
     std::vector<std::string> obd_request(const std::string& command);
     std::vector<std::vector<std::uint8_t>> vehicle_messages(const std::vector<std::uint8_t>& request);
     std::vector<std::vector<std::uint8_t>> uds_messages(const std::vector<std::uint8_t>& request);
+    /// The data identifiers of the module the current header addresses; nullptr if none answers it.
+    std::map<std::uint16_t, std::vector<std::uint8_t>>* addressed_module();
     std::vector<std::uint8_t> support_bitmap(std::uint8_t base) const;
     bool has_pid_above(std::uint32_t pid) const;
     std::vector<std::vector<std::uint8_t>> dtc_messages(std::uint8_t service,
@@ -127,6 +145,8 @@ private:
     bool spaces_{true};
     char protocol_{'0'};  ///< Selected with ATSP; kept across resets like in the EEPROM.
     bool connected_{false};
+    std::string header_{};          ///< Set with ATSH; empty after a reset (the default header).
+    std::uint8_t session_{0x01U};   ///< The diagnostic session of the modules (10 xx).
     std::string last_command_{};
     std::string input_{};
 
