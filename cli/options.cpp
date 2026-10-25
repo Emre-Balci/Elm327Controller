@@ -30,44 +30,65 @@ struct OptionSpec final {
     std::string_view short_name;  ///< Empty if the option has none.
     std::string_view long_name;
     bool takes_value;
+    std::string_view setting;  ///< The name of the option as a setting of the shell; empty if it is none.
+    bool connection;           ///< A setting of the connection: on a line of the shell, use 'set' instead.
 };
 
 constexpr std::array<OptionSpec, 9U> kOptionSpecs{{
-    {OptionId::kDevice, "-d", "--device", true},
-    {OptionId::kBaud, "-b", "--baud", true},
-    {OptionId::kProtocol, "-p", "--protocol", true},
-    {OptionId::kTimeout, "-t", "--timeout", true},
-    {OptionId::kInterval, "-i", "--interval", true},
-    {OptionId::kCount, "-n", "--count", true},
-    {OptionId::kVerbose, "-v", "--verbose", false},
-    {OptionId::kHelp, "-h", "--help", false},
-    {OptionId::kVersion, "", "--version", false},
+    {OptionId::kDevice, "-d", "--device", true, "device", true},
+    {OptionId::kBaud, "-b", "--baud", true, "baud", true},
+    {OptionId::kProtocol, "-p", "--protocol", true, "protocol", true},
+    {OptionId::kTimeout, "-t", "--timeout", true, "timeout", true},
+    {OptionId::kInterval, "-i", "--interval", true, "interval", false},
+    {OptionId::kCount, "-n", "--count", true, "count", false},
+    {OptionId::kVerbose, "-v", "--verbose", false, "verbose", false},
+    {OptionId::kHelp, "-h", "--help", false, "", false},
+    {OptionId::kVersion, "", "--version", false, "", false},
 }};
 
 struct CommandSpec final {
     Command command;
     std::string_view name;
+    bool shell_only;
 };
 
-constexpr std::array<CommandSpec, 8U> kCommandSpecs{{
-    {Command::kInfo, "info"},
-    {Command::kPids, "pids"},
-    {Command::kRead, "read"},
-    {Command::kMonitor, "monitor"},
-    {Command::kDtc, "dtc"},
-    {Command::kVin, "vin"},
-    {Command::kRaw, "raw"},
-    {Command::kHelp, "help"},
+constexpr std::array<CommandSpec, 14U> kCommandSpecs{{
+    {Command::kInfo, "info", false},
+    {Command::kPids, "pids", false},
+    {Command::kRead, "read", false},
+    {Command::kMonitor, "monitor", false},
+    {Command::kDtc, "dtc", false},
+    {Command::kVin, "vin", false},
+    {Command::kRaw, "raw", false},
+    {Command::kHelp, "help", false},
+    {Command::kConnect, "connect", true},
+    {Command::kDisconnect, "disconnect", true},
+    {Command::kSet, "set", true},
+    {Command::kShow, "show", true},
+    {Command::kQuit, "quit", true},
+    {Command::kQuit, "exit", true},
 }};
 
-/// The protocol numbers of the ELM327, and the same in lower case at the same positions.
-constexpr std::string_view kProtocols{"0123456789ABC"};
-constexpr std::string_view kLowerProtocols{"0123456789abc"};
+/// The names of kCommandSpecs, for completion.
+constexpr std::array<std::string_view, kCommandSpecs.size()> kCommandNames{{
+    "info", "pids", "read", "monitor", "dtc", "vin", "raw", "help", "connect", "disconnect", "set", "show", "quit",
+    "exit",
+}};
 
-constexpr std::array<std::string_view, 24U> kUsage{{
-    "Usage: elm327ctl [options] <command> [arguments]",
+/// The settings of kOptionSpecs, for completion.
+constexpr std::array<std::string_view, 7U> kSettingNames{{
+    "device", "baud", "protocol", "timeout", "interval", "count", "verbose",
+}};
+
+/// The values of 'set verbose'.
+constexpr std::array<std::string_view, 4U> kOnWords{{"on", "yes", "true", "1"}};
+constexpr std::array<std::string_view, 4U> kOffWords{{"off", "no", "false", "0"}};
+
+constexpr std::array<std::string_view, 27U> kUsage{{
+    "Usage: elm327ctl [options] [command [arguments]]",
     "",
-    "Talks to an ELM327 OBD-II adapter on a serial port.",
+    "Talks to an ELM327 OBD-II adapter on a serial port. Without a command, elm327ctl starts an",
+    "interactive shell, which keeps the connection open between commands (type 'help' there).",
     "",
     "Commands:",
     "  info              adapter identity, supply voltage and the vehicle's protocol",
@@ -89,13 +110,72 @@ constexpr std::array<std::string_view, 24U> kUsage{{
     "  -v, --verbose       print the traffic with the adapter on stderr",
     "  -h, --help          show this help",
     "      --version       show the version",
+    "",
+    "In the shell, the options are its settings at the start.",
+}};
+
+constexpr std::array<std::string_view, 33U> kShellHelp{{
+    "Commands:",
+    "  connect [DEVICE]  connect to the adapter, at DEVICE if given (it becomes the device setting)",
+    "  disconnect        close the connection",
+    "  info              adapter identity, supply voltage and the vehicle's protocol",
+    "  pids              list the service 01 PIDs the vehicle supports",
+    "  read PID...       read service 01 PIDs once, e.g. 'read 0C 0D 05'",
+    "  monitor PID...    read PIDs repeatedly until Ctrl+C (see the interval and count settings)",
+    "  dtc               read the MIL status and the stored, pending and permanent DTCs",
+    "  vin               read the vehicle identification number",
+    "  raw COMMAND...    send AT commands or OBD requests and print the replies",
+    "  set NAME VALUE    change a setting",
+    "  show              show the settings and the connection (also 'set' alone)",
+    "  help              show this help",
+    "  quit              leave the shell (also 'exit' or Ctrl+D)",
+    "",
+    "Settings:",
+    "  device PATH       serial device, e.g. /dev/ttyUSB0 or /dev/rfcomm0",
+    "  baud RATE         bit rate, e.g. 38400, 9600 or 115200",
+    "  protocol N        OBD protocol 0-9 or A-C (0: automatic)",
+    "  timeout MS        reply timeout of a command in ms",
+    "  interval MS       monitor: time between samples in ms",
+    "  count N           monitor: stop after N samples (0: until Ctrl+C)",
+    "  verbose on|off    print the traffic with the adapter",
+    "",
+    "The commands that need the adapter connect to it first, and the connection stays open. A",
+    "change of device, baud, protocol or timeout applies from the next connection.",
+    "",
+    "Options apply to one command, e.g. 'monitor -i 250 -n 10 0C 0D' or 'read -v 0C'.",
+    "",
+    "Keys: Ctrl+C stops a command or discards the line, Tab completes commands and settings,",
+    "Up and Down browse the history, Ctrl+A and Ctrl+E go to the start and the end of the line,",
+    "Ctrl+U, Ctrl+K and Ctrl+W delete before the cursor, after it and the word before it, and",
+    "Ctrl+L clears the screen.",
 }};
 
 // Too few lines do not compile; too many would leave empty lines at the end.
 static_assert(!kUsage.back().empty(), "kUsage has more entries than lines");
+static_assert(!kShellHelp.back().empty(), "kShellHelp has more entries than lines");
+
+/// Where the parsed words come from.
+enum class Source : std::uint8_t {
+    kCommandLine,
+    kShell,
+};
 
 common::Span<const char> span_of(const std::string_view text) noexcept {
     return common::Span<const char>{text.data(), text.size()};
+}
+
+std::string_view view_of(const common::Span<const char> text) noexcept {
+    return std::string_view{text.data(), text.size()};
+}
+
+/// Writes "<reason>: '<subject>'" to @p error, or the reason alone without a subject.
+/// @return kInvalidArgument.
+common::Status fail(Line& error, const std::string_view reason, const common::Span<const char> subject) noexcept {
+    error.text(reason);
+    if (!subject.empty()) {
+        error.text(": '").text(subject).character('\'');
+    }
+    return common::Status::kInvalidArgument;
 }
 
 /// A number of milliseconds above 0.
@@ -108,10 +188,84 @@ common::Status parse_milliseconds(const common::Span<const char> text, common::D
     return valid ? common::Status::kOk : common::Status::kInvalidArgument;
 }
 
-/// Consumes the command line one argument at a time.
+/// @return true if @p word is one of @p words.
+template <std::size_t Size>
+bool is_one_of(const common::Span<const char> word, const std::array<std::string_view, Size>& words) noexcept {
+    bool found{false};
+    for (std::size_t index{0U}; (!found) && (index < words.size()); ++index) {
+        found = common::equals(word, words[index]);
+    }
+    return found;
+}
+
+/// Sets the option @p spec, one that takes a value, to @p value.
+common::Status apply_value(const OptionSpec& spec, const common::Span<const char> value, Options& options,
+                           Line& error) noexcept {
+    common::Status status{common::Status::kOk};
+    switch (spec.id) {
+        case OptionId::kDevice:
+            if (value.empty()) {
+                status = fail(error, "empty device path", span_of(spec.long_name));
+            } else if (!options.connection.device.assign(view_of(value))) {
+                status = fail(error, "device path too long", value);
+            } else {
+                // Set.
+            }
+            break;
+        case OptionId::kBaud: {
+            const common::Result<std::uint32_t> rate{common::parse_unsigned<std::uint32_t>(value)};
+            const common::Result<common::BaudRate> baud_rate{
+                rate.has_value() ? common::baud_rate_from_bits_per_second(rate.value())
+                                 : common::Result<common::BaudRate>::failure(common::Status::kInvalidArgument)};
+            if (baud_rate.has_value()) {
+                options.connection.baud_rate = baud_rate.value();
+            } else {
+                status = fail(error, "unsupported baud rate", value);
+            }
+            break;
+        }
+        case OptionId::kProtocol: {
+            const common::Result<char> protocol{parse_protocol(value)};
+            if (protocol.has_value()) {
+                options.connection.protocol = protocol.value();
+            } else {
+                status = fail(error, "invalid protocol (0-9 or A-C)", value);
+            }
+            break;
+        }
+        case OptionId::kTimeout:
+            if (!is_ok(parse_milliseconds(value, options.connection.timeouts.command))) {
+                status = fail(error, "invalid timeout in ms", value);
+            }
+            break;
+        case OptionId::kInterval:
+            if (!is_ok(parse_milliseconds(value, options.interval))) {
+                status = fail(error, "invalid interval in ms", value);
+            }
+            break;
+        case OptionId::kCount: {
+            const common::Result<std::uint32_t> count{common::parse_unsigned<std::uint32_t>(value)};
+            if (count.has_value()) {
+                options.count = count.value();
+            } else {
+                status = fail(error, "invalid count", value);
+            }
+            break;
+        }
+        case OptionId::kVerbose:
+        case OptionId::kHelp:
+        case OptionId::kVersion:
+            status = fail(error, "option takes no value", span_of(spec.long_name));
+            break;
+    }
+    return status;
+}
+
+/// Consumes the words of the command line or of a shell line, one at a time.
 class Parser final {
 public:
-    Parser(Options& options, Line& error) noexcept : options_{&options}, error_{&error} {}
+    Parser(Options& options, Line& error, const Source source) noexcept
+        : options_{&options}, error_{&error}, source_{source} {}
 
     common::Status take(common::Span<const char> argument) noexcept;
     common::Status finish() noexcept;
@@ -121,13 +275,15 @@ private:
     common::Status take_word(common::Span<const char> word) noexcept;
     common::Status apply(const OptionSpec& spec, common::Span<const char> value) noexcept;
     common::Status check_arguments() noexcept;
-    common::Status fail(std::string_view reason, common::Span<const char> subject) noexcept;
+    common::Status check_count(std::size_t most) noexcept;
 
     Options* options_;
     Line* error_;
+    Source source_;
     const OptionSpec* pending_{nullptr};  ///< An option whose value is the next argument.
     bool options_ended_{false};           ///< After "--", every argument is a word.
     bool command_seen_{false};
+    bool option_seen_{false};
     bool help_{false};
     bool version_{false};
 };
@@ -160,12 +316,17 @@ common::Status Parser::take_option(const common::Span<const char> argument) noex
             spec = &candidate;
         }
     }
+    option_seen_ = true;
     common::Status status{common::Status::kOk};
     if (spec == nullptr) {
-        status = fail("unknown option", name);
+        status = fail(*error_, "unknown option", name);
+    } else if ((source_ == Source::kShell) && spec->connection) {
+        error_->character('\'').text(name).text("' is a setting in the shell: use 'set ").text(spec->setting);
+        error_->character('\'');
+        status = common::Status::kInvalidArgument;
     } else if (equals_sign.has_value()) {
         status = spec->takes_value ? apply(*spec, argument.subspan(equals_sign.value() + 1U))
-                                   : fail("option takes no value", name);
+                                   : fail(*error_, "option takes no value", name);
     } else if (spec->takes_value) {
         pending_ = spec;
     } else {
@@ -177,18 +338,22 @@ common::Status Parser::take_option(const common::Span<const char> argument) noex
 common::Status Parser::take_word(const common::Span<const char> word) noexcept {
     common::Status status{common::Status::kOk};
     if (command_seen_) {
-        status = options_->arguments.push_back(word) ? common::Status::kOk : fail("too many arguments", word);
+        status = options_->arguments.push_back(word) ? common::Status::kOk : fail(*error_, "too many arguments", word);
     } else {
-        bool found{false};
-        for (std::size_t index{0U}; (!found) && (index < kCommandSpecs.size()); ++index) {
-            found = common::equals(word, kCommandSpecs[index].name);
-            if (found) {
-                options_->command = kCommandSpecs[index].command;
+        const CommandSpec* spec{nullptr};
+        for (std::size_t index{0U}; (spec == nullptr) && (index < kCommandSpecs.size()); ++index) {
+            if (common::equals(word, kCommandSpecs[index].name)) {
+                spec = &kCommandSpecs[index];
             }
         }
-        command_seen_ = found;
-        if (!found) {
-            status = fail("unknown command", word);
+        if (spec == nullptr) {
+            status = fail(*error_, "unknown command", word);
+        } else if (spec->shell_only && (source_ == Source::kCommandLine)) {
+            error_->character('\'').text(word).text("' works in the shell only (start elm327ctl without a command)");
+            status = common::Status::kInvalidArgument;
+        } else {
+            options_->command = spec->command;
+            command_seen_ = true;
         }
     }
     return status;
@@ -196,69 +361,14 @@ common::Status Parser::take_word(const common::Span<const char> word) noexcept {
 
 common::Status Parser::apply(const OptionSpec& spec, const common::Span<const char> value) noexcept {
     common::Status status{common::Status::kOk};
-    switch (spec.id) {
-        case OptionId::kDevice:
-            // The value runs to the end of its command-line argument, so it is NUL-terminated.
-            options_->device = value.data();
-            if (value.empty()) {
-                status = fail("empty device path", span_of(spec.long_name));
-            }
-            break;
-        case OptionId::kBaud: {
-            const common::Result<std::uint32_t> rate{common::parse_unsigned<std::uint32_t>(value)};
-            const common::Result<common::BaudRate> baud_rate{
-                rate.has_value() ? common::baud_rate_from_bits_per_second(rate.value())
-                                 : common::Result<common::BaudRate>::failure(common::Status::kInvalidArgument)};
-            options_->baud_rate = baud_rate.value_or(common::BaudRate::k38400);
-            if (!baud_rate.has_value()) {
-                status = fail("unsupported baud rate", value);
-            }
-            break;
-        }
-        case OptionId::kProtocol: {
-            std::size_t position{std::string_view::npos};
-            if (value.size() == 1U) {
-                position = kProtocols.find(value[0U]);
-                if (position == std::string_view::npos) {
-                    position = kLowerProtocols.find(value[0U]);
-                }
-            }
-            if (position != std::string_view::npos) {
-                options_->protocol = kProtocols[position];
-            } else {
-                status = fail("invalid protocol (0-9 or A-C)", value);
-            }
-            break;
-        }
-        case OptionId::kTimeout:
-            status = parse_milliseconds(value, options_->timeout);
-            if (!is_ok(status)) {
-                status = fail("invalid timeout in ms", value);
-            }
-            break;
-        case OptionId::kInterval:
-            status = parse_milliseconds(value, options_->interval);
-            if (!is_ok(status)) {
-                status = fail("invalid interval in ms", value);
-            }
-            break;
-        case OptionId::kCount: {
-            const common::Result<std::uint32_t> count{common::parse_unsigned<std::uint32_t>(value)};
-            options_->count = count.value_or(0U);
-            if (!count.has_value()) {
-                status = fail("invalid count", value);
-            }
-            break;
-        }
-        case OptionId::kVerbose:
-            options_->verbose = true;
-            break;
-        case OptionId::kHelp:
-            help_ = true;
-            break;
-        case OptionId::kVersion:
-            version_ = true;
-            break;
+    if (spec.id == OptionId::kVerbose) {
+        options_->verbose = true;
+    } else if (spec.id == OptionId::kHelp) {
+        help_ = true;
+    } else if (spec.id == OptionId::kVersion) {
+        version_ = true;
+    } else {
+        status = apply_value(spec, value, *options_, *error_);
     }
     return status;
 }
@@ -266,15 +376,19 @@ common::Status Parser::apply(const OptionSpec& spec, const common::Span<const ch
 common::Status Parser::finish() noexcept {
     common::Status status{common::Status::kOk};
     if (pending_ != nullptr) {
-        status = fail("option needs a value", span_of(pending_->long_name));
+        status = fail(*error_, "option needs a value", span_of(pending_->long_name));
     } else if (help_) {
         options_->command = Command::kHelp;
     } else if (version_) {
         options_->command = Command::kVersion;
-    } else if (!command_seen_) {
-        status = fail("missing command", common::Span<const char>{});
-    } else {
+    } else if (command_seen_) {
         status = check_arguments();
+    } else if (source_ == Source::kCommandLine) {
+        options_->command = Command::kShell;
+    } else if (option_seen_) {
+        status = fail(*error_, "missing command", common::Span<const char>{});
+    } else {
+        options_->command = Command::kNone;
     }
     return status;
 }
@@ -287,31 +401,48 @@ common::Status Parser::check_arguments() noexcept {
         case Command::kPids:
         case Command::kDtc:
         case Command::kVin:
-            if (!none) {
-                status = fail("unexpected argument", options_->arguments[0U]);
-            }
+        case Command::kDisconnect:
+        case Command::kShow:
+        case Command::kQuit:
+            status = check_count(0U);
             break;
         case Command::kRead:
         case Command::kMonitor:
             if (none) {
-                status = fail("missing PID, e.g. 0C", common::Span<const char>{});
+                status = fail(*error_, "missing PID, e.g. 0C", common::Span<const char>{});
             }
             for (std::size_t index{0U}; is_ok(status) && (index < options_->arguments.size()); ++index) {
                 if (!parse_pid(options_->arguments[index]).has_value()) {
-                    status = fail("invalid PID (1 or 2 hexadecimal digits)", options_->arguments[index]);
+                    status = fail(*error_, "invalid PID (1 or 2 hexadecimal digits)", options_->arguments[index]);
                 }
             }
             break;
         case Command::kRaw:
             if (none) {
-                status = fail("missing command for the adapter, e.g. ATI", common::Span<const char>{});
+                status = fail(*error_, "missing command for the adapter, e.g. ATI", common::Span<const char>{});
             }
             for (std::size_t index{0U}; is_ok(status) && (index < options_->arguments.size()); ++index) {
                 if (options_->arguments[index].size() > Adapter::kMaxCommandLength) {
-                    status = fail("command too long for the adapter", options_->arguments[index]);
+                    status = fail(*error_, "command too long for the adapter", options_->arguments[index]);
                 }
             }
             break;
+        case Command::kConnect:
+            status = check_count(1U);
+            if (is_ok(status) && (!none) &&
+                (options_->arguments[0U].size() > ConnectionSettings::kMaxDeviceLength)) {
+                status = fail(*error_, "device path too long", options_->arguments[0U]);
+            }
+            break;
+        case Command::kSet:
+            if (options_->arguments.size() == 1U) {
+                status = fail(*error_, "missing value for the setting", options_->arguments[0U]);
+            } else {
+                status = check_count(2U);
+            }
+            break;
+        case Command::kShell:
+        case Command::kNone:
         case Command::kHelp:
         case Command::kVersion:
             break;
@@ -319,19 +450,42 @@ common::Status Parser::check_arguments() noexcept {
     return status;
 }
 
-common::Status Parser::fail(const std::string_view reason, const common::Span<const char> subject) noexcept {
-    error_->text(reason);
-    if (!subject.empty()) {
-        error_->text(": '").text(subject).character('\'');
-    }
-    return common::Status::kInvalidArgument;
+common::Status Parser::check_count(const std::size_t most) noexcept {
+    return (options_->arguments.size() > most) ? fail(*error_, "unexpected argument", options_->arguments[most])
+                                               : common::Status::kOk;
 }
 
 }  // namespace
 
+bool needs_adapter(const Command command) noexcept {
+    bool needed{false};
+    switch (command) {
+        case Command::kInfo:
+        case Command::kPids:
+        case Command::kRead:
+        case Command::kMonitor:
+        case Command::kDtc:
+        case Command::kVin:
+        case Command::kRaw:
+            needed = true;
+            break;
+        case Command::kShell:
+        case Command::kNone:
+        case Command::kHelp:
+        case Command::kVersion:
+        case Command::kConnect:
+        case Command::kDisconnect:
+        case Command::kSet:
+        case Command::kShow:
+        case Command::kQuit:
+            break;
+    }
+    return needed;
+}
+
 common::Status parse_options(const common::Span<const char* const> args, Options& options, Line& error) noexcept {
     options = Options{};
-    Parser parser{options, error};
+    Parser parser{options, error, Source::kCommandLine};
     common::Status status{common::Status::kOk};
     // args[0] is the program name.
     for (std::size_t index{1U}; is_ok(status) && (index < args.size()); ++index) {
@@ -344,6 +498,87 @@ common::Status parse_options(const common::Span<const char* const> args, Options
     return status;
 }
 
+common::Status split_words(const common::Span<const char> line, Words& words, Line& error) noexcept {
+    words.clear();
+    common::Status status{common::Status::kOk};
+    std::size_t index{0U};
+    bool comment{false};
+    while (is_ok(status) && (!comment) && (index < line.size())) {
+        if (common::is_space(line[index])) {
+            ++index;
+        } else if (line[index] == '#') {
+            comment = true;
+        } else {
+            const std::size_t start{index};
+            while ((index < line.size()) && (!common::is_space(line[index]))) {
+                ++index;
+            }
+            const common::Span<const char> word{line.subspan(start, index - start)};
+            if (!words.push_back(word)) {
+                status = fail(error, "too many words", common::Span<const char>{});
+            }
+        }
+    }
+    return status;
+}
+
+common::Status parse_line(const Words& words, const Options& settings, Options& options, Line& error) noexcept {
+    options = settings;
+    options.command = Command::kNone;
+    options.arguments.clear();
+    Parser parser{options, error, Source::kShell};
+    common::Status status{common::Status::kOk};
+    for (std::size_t index{0U}; is_ok(status) && (index < words.size()); ++index) {
+        status = parser.take(words[index]);
+    }
+    if (is_ok(status)) {
+        status = parser.finish();
+    }
+    return status;
+}
+
+common::Status apply_setting(const common::Span<const char> name, const common::Span<const char> value,
+                             Options& options, Line& error) noexcept {
+    const OptionSpec* spec{nullptr};
+    for (std::size_t index{0U}; (spec == nullptr) && (index < kOptionSpecs.size()); ++index) {
+        const std::string_view setting{kOptionSpecs[index].setting};
+        if ((!setting.empty()) && common::equals(name, setting)) {
+            spec = &kOptionSpecs[index];
+        }
+    }
+    common::Status status{common::Status::kOk};
+    if (spec == nullptr) {
+        status = fail(error, "unknown setting (device, baud, protocol, timeout, interval, count, verbose)", name);
+    } else if (spec->id == OptionId::kVerbose) {
+        if (is_one_of(value, kOnWords)) {
+            options.verbose = true;
+        } else if (is_one_of(value, kOffWords)) {
+            options.verbose = false;
+        } else {
+            status = fail(error, "invalid value for verbose (on or off)", value);
+        }
+    } else {
+        status = apply_value(*spec, value, options, error);
+    }
+    return status;
+}
+
+bool is_connection_setting(const common::Span<const char> name) noexcept {
+    bool connection{false};
+    for (const OptionSpec& spec : kOptionSpecs) {
+        connection = connection || (spec.connection && common::equals(name, spec.setting));
+    }
+    return connection;
+}
+
+common::Span<const std::string_view> shell_commands() noexcept {
+    return common::Span<const std::string_view>{kCommandNames.data(), kCommandNames.size()};
+}
+
+common::Span<const std::string_view> setting_names() noexcept {
+    return common::Span<const std::string_view>{kSettingNames.data(), kSettingNames.size()};
+}
+
 common::Result<std::uint8_t> parse_pid(const common::Span<const char> text) noexcept {
     return ((!text.empty()) && (text.size() <= 2U))
                ? common::parse_hex<std::uint8_t>(text)
@@ -352,6 +587,12 @@ common::Result<std::uint8_t> parse_pid(const common::Span<const char> text) noex
 
 void print_usage(Console& console) noexcept {
     for (const std::string_view line : kUsage) {
+        console.print(line);
+    }
+}
+
+void print_shell_help(Console& console) noexcept {
+    for (const std::string_view line : kShellHelp) {
         console.print(line);
     }
 }

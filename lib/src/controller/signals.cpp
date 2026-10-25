@@ -1,22 +1,21 @@
-#include "cli/signals.hpp"
+#include "elm327/controller/signals.hpp"
 
-#include <poll.h>
 #include <signal.h>
 #include <sys/signalfd.h>
-#include <time.h>
 #include <unistd.h>
 
-#include <cerrno>
+#include <cstddef>
 #include <cstdint>
 
-#include "common/time/clock.hpp"
-
 namespace elm327 {
-namespace cli {
 namespace {
 
-/// Each round of the wait loop ends the wait or is a restart after EINTR.
-constexpr std::uint32_t kMaxWaitRounds{1000U};
+/// Reads per take_stop_request(): far more signals than can be pending, since the kernel merges
+/// repeated standard signals.
+constexpr std::uint32_t kMaxTakes{64U};
+
+/// Bytes of an eventfd counter.
+constexpr std::size_t kEventSize{8U};
 
 /// The signals that stop the program.
 sigset_t stop_signal_set() noexcept {
@@ -27,14 +26,6 @@ sigset_t stop_signal_set() noexcept {
     static_cast<void>(::sigaddset(&set, SIGHUP));
     static_cast<void>(::sigaddset(&set, SIGPIPE));
     return set;
-}
-
-timespec to_relative_timespec(const common::Duration duration) noexcept {
-    const std::int64_t ns{duration.count()};
-    timespec ts{};
-    ts.tv_sec = ns / common::MonotonicClock::kNanosPerSecond;
-    ts.tv_nsec = ns % common::MonotonicClock::kNanosPerSecond;
-    return ts;
 }
 
 }  // namespace
@@ -74,33 +65,31 @@ std::int32_t StopSignals::received() noexcept {
     return signal_;
 }
 
-common::Status wait_until(const std::int32_t descriptor, const common::Deadline& deadline) noexcept {
-    common::Status status{common::Status::kSystemError};
-    bool done{false};
-    for (std::uint32_t round{0U}; (!done) && (round < kMaxWaitRounds); ++round) {
-        pollfd entry{};
-        entry.fd = descriptor;  // poll() skips a negative descriptor.
-        entry.events = POLLIN;
-        timespec timeout{};
-        const timespec* timeout_pointer{nullptr};
-        if (!deadline.is_never()) {
-            timeout = to_relative_timespec(deadline.remaining());
-            timeout_pointer = &timeout;
-        }
-        const int ready{::ppoll(&entry, 1U, timeout_pointer, nullptr)};
-        done = true;
-        if (ready > 0) {
-            status = common::Status::kInterrupted;
-        } else if ((ready == 0) || deadline.expired()) {
-            status = common::Status::kOk;
-        } else if (errno == EINTR) {
-            done = false;  // A signal handler ran: wait for the rest of the time.
+std::int32_t take_stop_request(const std::int32_t descriptor) noexcept {
+    std::int32_t taken{0};
+    bool more{descriptor >= 0};
+    for (std::uint32_t round{0U}; more && (round < kMaxTakes); ++round) {
+        // A signalfd hands out one signalfd_siginfo per read, an eventfd its 8-byte counter. Both
+        // descriptors are non-blocking, so the loop ends when nothing is left.
+        signalfd_siginfo info{};
+        const ssize_t count{::read(descriptor, &info, sizeof(info))};
+        std::int32_t signal{0};
+        if (count == static_cast<ssize_t>(sizeof(info))) {
+            signal = static_cast<std::int32_t>(info.ssi_signo);
+        } else if (count == static_cast<ssize_t>(kEventSize)) {
+            signal = SIGINT;
         } else {
-            status = common::Status::kSystemError;
+            more = false;
+        }
+        if ((signal != 0) && ((taken == 0) || ends_program(signal))) {
+            taken = signal;
         }
     }
-    return status;
+    return taken;
 }
 
-}  // namespace cli
+bool ends_program(const std::int32_t signal) noexcept {
+    return (signal == SIGTERM) || (signal == SIGHUP) || (signal == SIGPIPE);
+}
+
 }  // namespace elm327

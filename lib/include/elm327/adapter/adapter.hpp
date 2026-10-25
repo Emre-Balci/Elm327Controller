@@ -68,6 +68,17 @@ struct AdapterOptions final {
 ///         to 'C' (see the ATSP command in the ELM327 data sheet).
 [[nodiscard]] bool is_valid_protocol(char protocol) noexcept;
 
+/// Parses a protocol number typed by a person: one character 0 to 9 or A to C, in either case.
+/// @return the protocol in upper case, e.g. 'A' for "a"; kInvalidArgument for anything else.
+[[nodiscard]] common::Result<char> parse_protocol(common::Span<const char> text) noexcept;
+
+/// @return the name of @p protocol, e.g. "ISO 15765-4 CAN (11 bit ID, 500 kbaud)" for '6' and
+///         "automatic" for '0'; "unknown" for an invalid protocol.
+[[nodiscard]] const char* protocol_name(char protocol) noexcept;
+
+/// The protocol numbers in the order of the data sheet: "0123456789ABC".
+[[nodiscard]] std::string_view protocols() noexcept;
+
 /// An ELM327 adapter on a serial port.
 ///
 /// The object embeds its buffers (about 5 KiB) and never allocates. Not thread-safe: one thread
@@ -113,6 +124,12 @@ public:
     /// the adapter's prompt or @p deadline. Input left over from an earlier command is discarded
     /// first, and the echo of the command is not part of the reply. The reply may be an error
     /// message of the adapter, e.g. "NO DATA": see Response::reply().
+    ///
+    /// When an earlier operation ended before the prompt (interrupted or timed out), the adapter
+    /// may still be answering it, and its late reply would be taken for this one. So the command
+    /// first waits briefly for that prompt, and stops the adapter if it is still busy: any
+    /// character interrupts an ELM327 ("STOPPED"), and an idle one ignores the space it is sent.
+    /// That wait counts against @p deadline.
     /// @return kOk when the prompt arrived; kInvalidArgument when the adapter is not open, or for a
     ///         command that is empty, longer than kMaxCommandLength or contains "\r"; kTimeout;
     ///         kInterrupted (cancelled); kOutOfRange if the reply did not fit in @p response (which
@@ -145,6 +162,11 @@ private:
     /// Reads the reply to @p command up to the prompt; see execute().
     common::Status read_reply(std::string_view command, Response& response, const common::Deadline& deadline) noexcept;
 
+    /// Waits for the prompt of an earlier command that ended without it, and stops the adapter if
+    /// it does not come soon; see execute(). The lines of the late reply go to @p scratch.
+    /// @return kOk once in step again; otherwise the errors of read_reply().
+    common::Status settle(Response& scratch, const common::Deadline& deadline) noexcept;
+
     /// Feeds @p received to the framer and passes complete lines on. Bytes after the prompt are
     /// dropped. @return true when the prompt arrived.
     bool consume(std::string_view command, common::Span<const std::uint8_t> received, Response& response,
@@ -173,6 +195,8 @@ private:
     TraceFunction trace_function_{nullptr};
     void* trace_context_{nullptr};
     std::int32_t cancel_descriptor_{-1};
+    /// The last command ended before the adapter's prompt: the adapter may still be answering it.
+    bool unsettled_{false};
 };
 
 }  // namespace elm327

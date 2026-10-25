@@ -1,5 +1,5 @@
 /// @file signals.hpp
-/// @brief Stopping elm327ctl cleanly on Ctrl+C.
+/// @brief Stopping a program cleanly on Ctrl+C.
 ///
 /// A process killed by a signal leaves its serial port to the kernel. The kernel closes it, but it
 /// cannot always release the exclusive access the port was opened with (TIOCEXCL): a device that
@@ -8,18 +8,19 @@
 /// descriptor becomes readable, every Adapter operation that watches it ends with kInterrupted,
 /// and the program closes the port and exits on its own.
 ///
+/// An interactive program goes on after Ctrl+C instead: take_stop_request() makes the descriptor
+/// unreadable again once the interrupted command has ended.
+///
 /// No signal handler is involved, so nothing has to be async-signal-safe.
 
-#ifndef ELM327_CLI_SIGNALS_HPP
-#define ELM327_CLI_SIGNALS_HPP
+#ifndef ELM327_CONTROLLER_SIGNALS_HPP
+#define ELM327_CONTROLLER_SIGNALS_HPP
 
 #include <cstdint>
 
 #include "common/core/status.hpp"
-#include "common/time/deadline.hpp"
 
 namespace elm327 {
-namespace cli {
 
 /// SIGINT (Ctrl+C), SIGTERM, SIGHUP (closed terminal) and SIGPIPE (closed output pipe), received
 /// through a descriptor. A program needs one, created at the start of main().
@@ -53,12 +54,16 @@ private:
     std::int32_t signal_{0};
 };
 
-/// Waits until @p deadline, or until @p descriptor becomes readable; -1 waits for the deadline only.
-/// @return kOk when the deadline passed; kInterrupted when the descriptor became readable first;
-///         kSystemError if waiting failed.
-common::Status wait_until(std::int32_t descriptor, const common::Deadline& deadline) noexcept;
+/// Takes the stop requests pending on @p descriptor, the descriptor of a StopSignals or an eventfd
+/// (as the tests and the GUI use), so that it is no longer readable. Does not wait.
+/// @return the signal that was pending: SIGTERM, SIGHUP or SIGPIPE when one of them was, since they
+///         end a program; otherwise SIGINT for a SIGINT or an eventfd; 0 if nothing was pending.
+[[nodiscard]] std::int32_t take_stop_request(std::int32_t descriptor) noexcept;
 
-}  // namespace cli
+/// @return true for the signals after which an interactive program ends instead of going on:
+///         every stop signal except SIGINT.
+[[nodiscard]] bool ends_program(std::int32_t signal) noexcept;
+
 }  // namespace elm327
 
-#endif  // ELM327_CLI_SIGNALS_HPP
+#endif  // ELM327_CONTROLLER_SIGNALS_HPP

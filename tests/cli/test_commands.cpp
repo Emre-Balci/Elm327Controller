@@ -51,8 +51,8 @@ Outcome run_cli(std::vector<std::string> arguments, const int cancel_descriptor 
     if ((out_descriptor >= 0) && (err_descriptor >= 0)) {
         elm327::cli::Console out{out_descriptor};
         elm327::cli::Console err{err_descriptor};
-        outcome.exit_code = elm327::cli::run(common::Span<const char* const>{pointers.data(), pointers.size()}, out,
-                                             err, cancel_descriptor);
+        outcome.exit_code = elm327::cli::run(common::Span<const char* const>{pointers.data(), pointers.size()}, -1,
+                                             out, err, cancel_descriptor);
         outcome.out = read_back(out_descriptor);
         outcome.err = read_back(err_descriptor);
     }
@@ -70,7 +70,7 @@ bool contains(const std::string& text, const std::string& part) {
 TEST_CASE(cli_help_version_and_usage_errors) {
     const Outcome help{run_cli({"--help"})};
     CHECK(help.exit_code == elm327::cli::kExitSuccess);
-    CHECK(contains(help.out, "Usage: elm327ctl [options] <command> [arguments]\n"));
+    CHECK(contains(help.out, "Usage: elm327ctl [options] [command [arguments]]\n"));
     CHECK(contains(help.out, "  monitor PID...    read PIDs repeatedly until Ctrl+C (see -i, -n)\n"));
     CHECK(help.err.empty());
 
