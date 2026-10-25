@@ -1,6 +1,6 @@
 # Test sources mirror the header groups in lib/include/elm327/<group>/; cli/ tests the command-line
-# tool and its shell, gui/ the worker of the GUI. Like Common's tests, they use the heap,
-# std::string and std::thread, and are outside the compliance scope.
+# tool and its shell, gui/ the worker of the GUI and the gauges of its widget mode. Like Common's
+# tests, they use the heap, std::string and std::thread, and are outside the compliance scope.
 add_executable(elm327_tests
     test_main.cpp
     adapter/test_adapter.cpp
@@ -10,6 +10,7 @@ add_executable(elm327_tests
     cli/test_options.cpp
     cli/test_shell.cpp
     controller/test_controller.cpp
+    gui/test_gauge.cpp
     gui/test_worker.cpp
     obd/test_client.cpp
     obd/test_dtc.cpp

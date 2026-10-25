@@ -17,7 +17,9 @@ used.
   `line_editor` turns keys into a line without touching the terminal.
 - `gui/`: `elm327gui`. `worker` (the `elm327gui_core` library, no ImGui) owns the `Controller` on a
   thread of its own and talks to the window through Common's queues; `app` draws the window with
-  ImGui; `main` sets up GLFW and OpenGL. The window never does serial I/O.
+  ImGui; `main` sets up GLFW and OpenGL. The window never does serial I/O. Widget mode: `gauge`
+  (also in `elm327gui_core`, no ImGui) holds the scale of every dial and plans the layout, so a new
+  dial is a row in its table plus a test; `dashboard` draws them.
 - `sim/`: `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal, and the `elm327sim`
   tool. Extend it whenever the library learns a new command, so the tests can cover it.
 - `tests/<group>/`, `tests/cli/`, `tests/gui/`: tests with the same minimal framework as Common's.
@@ -72,5 +74,6 @@ must build warning-free (`-Werror`) and pass. Try a change by hand with `elm327s
 The GUI is built when GLFW 3.3+ is found (`ELM327_BUILD_GUI=AUTO`): `sudo apt install
 libglfw3-dev`. On this machine, without sudo, GLFW is that Ubuntu package extracted into `~/.local`,
 which CMake finds through `~/.local/bin` in `PATH`.
-WSLg provides the display. `elm327gui --screenshot FILE.ppm` (with `--tab`, `--monitor`) renders
-the window, saves it and exits, which lets a change to the window be checked without clicking.
+WSLg provides the display. `elm327gui --screenshot FILE.ppm` (with `--tab`, `--monitor`,
+`--widgets`) renders the window, saves it and exits, which lets a change to the window be checked
+without clicking.

@@ -5,7 +5,8 @@
 /// The window has a connection bar (device, baud rate, protocol, Connect), four tabs and a status
 /// line:
 /// - Live data: the supported PIDs with their latest values; selected PIDs are monitored and
-///   plotted;
+///   plotted. In widget mode the selected PIDs are the gauges of a classic car dashboard instead
+///   (see Dashboard);
 /// - Trouble codes: the MIL status and the stored, pending and permanent DTCs;
 /// - Vehicle: the VIN and what the adapter tells about itself;
 /// - Terminal: the traffic with the adapter, and a line to send AT commands or OBD requests.
@@ -25,6 +26,7 @@
 #include "common/protocol/delimited_framer.hpp"
 #include "common/time/clock.hpp"
 #include "elm327/controller/controller.hpp"
+#include "gui/dashboard.hpp"
 #include "gui/worker.hpp"
 
 namespace elm327 {
@@ -50,6 +52,8 @@ struct StartOptions final {
     common::ByteSet monitor{};
     common::Duration interval{std::chrono::seconds{1}};
     Tab tab{Tab::kLive};
+    /// Start in widget mode: the live data as gauges.
+    bool widgets{false};
 };
 
 class App final {
@@ -87,6 +91,10 @@ private:
 
     void draw_connection() noexcept;
     void draw_live() noexcept;
+    /// The toolbar of the live data: widget mode, monitoring, interval, and what is selected.
+    void draw_live_toolbar(const State& state) noexcept;
+    /// The selection of widget mode: a gauge or a digital display for each supported PID.
+    void draw_shown_choice(const State& state) noexcept;
     void draw_pid_table(const State& state) noexcept;
     void draw_plots() noexcept;
     void draw_trouble_codes() noexcept;
@@ -96,12 +104,19 @@ private:
 
     void connect() noexcept;
     void start_monitor() noexcept;
+    /// Turns widget mode on: selects the default dashboard if no selected PID has a gauge, and
+    /// starts monitoring.
+    void start_dashboard() noexcept;
+    /// Selects @p pid or not, restarting a running monitor with the new selection.
+    void select(std::uint8_t pid, bool selected) noexcept;
     void send_command() noexcept;
     /// Restarts the histories for the PIDs in @p pids.
     void reset_histories(const common::ByteSet& pids) noexcept;
     /// Lists the serial devices that exist, for the combo next to the device field.
     void detect_devices() noexcept;
     [[nodiscard]] std::size_t selected_count() const noexcept;
+    /// The selected PIDs: monitored, plotted, and shown in widget mode.
+    [[nodiscard]] common::ByteSet selection() const noexcept;
     [[nodiscard]] ConnectionSettings settings() const noexcept;
 
     Worker* worker_;
@@ -125,6 +140,13 @@ private:
     std::array<History, kMaxMonitored> histories_{};
     std::int32_t interval_ms_{1000};
     common::ByteSet pending_monitor_{};  ///< Monitor these once the supported PIDs are known.
+
+    // Widget mode.
+    bool widget_mode_{false};
+    /// Widget mode has started monitoring for this connection, or a monitor ran: it does not start
+    /// one again by itself after the user stopped it.
+    bool dashboard_started_{false};
+    Dashboard dashboard_{};
 
     // The tabs that read on their first display.
     bool dtcs_requested_{false};

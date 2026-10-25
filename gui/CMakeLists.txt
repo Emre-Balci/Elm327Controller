@@ -1,8 +1,9 @@
-# elm327gui, the graphical front-end. The worker thread that talks to the adapter is the library
-# elm327gui_core, which does not depend on ImGui, so the tests drive it without a display. The
-# window itself uses Dear ImGui (the git submodule third_party/imgui) on GLFW and OpenGL 3.
+# elm327gui, the graphical front-end. The worker thread that talks to the adapter, and the scales of
+# the gauges of widget mode, are the library elm327gui_core, which does not depend on ImGui, so the
+# tests run them without a display. The window itself uses Dear ImGui (the git submodule
+# third_party/imgui) on GLFW and OpenGL 3.
 if(ELM327_BUILD_TESTS OR NOT ELM327_BUILD_GUI STREQUAL "OFF")
-    add_library(elm327gui_core STATIC worker.cpp)
+    add_library(elm327gui_core STATIC gauge.cpp worker.cpp)
     # The sources include each other as "gui/<file>.hpp".
     target_include_directories(elm327gui_core PUBLIC "${PROJECT_SOURCE_DIR}")
     target_link_libraries(elm327gui_core
@@ -49,6 +50,6 @@ target_compile_options(imgui PRIVATE -fno-exceptions -fno-rtti)
 target_link_libraries(imgui PUBLIC glfw ${CMAKE_DL_LIBS})
 set_target_properties(imgui PROPERTIES CXX_CLANG_TIDY "")
 
-add_executable(elm327gui main.cpp app.cpp)
+add_executable(elm327gui main.cpp app.cpp dashboard.cpp)
 target_link_libraries(elm327gui PRIVATE elm327gui_core imgui common::options)
 install(TARGETS elm327gui RUNTIME DESTINATION bin)

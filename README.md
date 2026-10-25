@@ -13,7 +13,8 @@ The project has two parts:
     keeps the connection open between commands, with line editing, history and completion. Given a
     command, it runs that command once, for scripts.
   - **`elm327gui`**, a graphical front-end drawn with [Dear ImGui](https://github.com/ocornut/imgui):
-    live data with plots, trouble codes, the VIN, and a terminal for AT commands.
+    live data with plots, or in widget mode as the gauges of a classic car dashboard; trouble
+    codes, the VIN, and a terminal for AT commands.
 
 `elm327sim` simulates an adapter and a vehicle on a pseudo-terminal, to try everything without
 hardware.
@@ -180,7 +181,7 @@ serial port.
 found; baud rate; protocol) and four tabs:
 
 - **Live data**: the PIDs the vehicle supports, with their latest values. Ticked PIDs (up to 16)
-  are monitored at the chosen interval and plotted.
+  are monitored at the chosen interval and plotted, or, in widget mode, shown as gauges.
 - **Trouble codes**: the MIL status and the stored, pending and permanent DTCs.
 - **Vehicle**: the VIN, and what the adapter tells about itself.
 - **Terminal**: the traffic with the adapter, and a line to send AT commands or OBD requests.
@@ -194,8 +195,37 @@ Usage: elm327gui [options]
   -c, --connect         connect at the start
   -m, --monitor PIDS    connect and monitor these PIDs, e.g. 0C,0D,05
   -i, --interval MS     time between the samples of the monitor (default 1000)
+  -w, --widgets         widget mode: the live data as the gauges of a dashboard
       --tab NAME        open the tab live, codes, vehicle or terminal
       --screenshot FILE save the window as a PPM image once it is idle, then exit
+```
+
+### Widget mode
+
+The **Widget mode** box of the Live data tab (or `--widgets`) turns the monitored PIDs into the
+instruments of a classic car: round dials with a chrome bezel, white ticks and numerals, colored
+zones and a needle that swings smoothly to the value, with the exact value in a small amber display.
+
+![elm327gui in widget mode: the instrument cluster of the simulated vehicle](docs/elm327gui-widgets.png)
+
+- The PIDs whose value suits a dial have one: engine speed (with the red zone from 6500 rpm) and
+  vehicle speed as the large dials; coolant, oil, intake and ambient temperature (blue when cold,
+  red when hot); fuel level (E, 1/2, F, with the reserve in red); throttle, engine load,
+  accelerator pedal; control-module voltage; manifold and barometric pressure, air flow, timing
+  advance, fuel rate and pressure; and the fuel trims around 0.
+- The other selected PIDs, such as the run time or the odometer, appear as digital displays below
+  the dials.
+- **Show** chooses what is on the dashboard; it is the same selection as the ticks of the table.
+  Turned on, widget mode shows the default dashboard (tachometer, speedometer, coolant, fuel,
+  throttle, load, voltage, oil, intake air, manifold pressure, as far as the vehicle supports
+  them) unless the selection already holds a dial, and starts monitoring.
+- The layout follows the window like an instrument cluster: the tachometer and the speedometer
+  side by side, pairs of smaller dials beside them when there is room, the rest in even rows below.
+  The dials shrink to fit and scroll only when they would get too small to read.
+
+```bash
+elm327gui -d /dev/pts/5 --connect --widgets        # the default dashboard
+elm327gui -d /dev/pts/5 --widgets --monitor 0C,05,2F,A6 -i 250
 ```
 
 The window never waits for the adapter: a worker thread owns the connection and runs the requests
@@ -283,6 +313,7 @@ the result once, half to even, to the resolution of the PID, so `(256 * A + B) /
 | Shell | `cli/shell.hpp`, `cli/terminal.hpp`, `cli/line_editor.hpp` | The shell reads lines through `LineInput`: in raw mode on a terminal, where `LineEditor` turns the keys into a line, or as plain lines from a pipe. While a command runs the terminal is back in its normal mode, so Ctrl+C reaches the command as SIGINT (through `StopSignals`), and the shell takes the request and goes on. |
 | GUI worker | `gui/worker.hpp` | `Worker` owns the `Controller` on its own thread. The window posts requests through an `SpscQueue`; the worker publishes a `State` snapshot through a `TripleBuffer`, and PID samples and the traffic through two more queues. Nobody waits for anybody; `cancel()` interrupts the operation in progress. |
 | GUI window | `gui/app.hpp`, `gui/main.cpp` | `App` draws the State with ImGui each frame and turns clicks into requests. `main.cpp` sets up GLFW and the OpenGL 3 backend, and redraws on input, on a result of the worker, or 30 times per second while it works. |
+| Widget mode | `gui/gauge.hpp`, `gui/dashboard.hpp` | `gauge.hpp` knows which PIDs suit a dial and the scale of each (range, ticks, zones, words such as E and F), the geometry of needle and ticks, and plans the layout of a dashboard; it does not draw, so the tests cover it. `Dashboard` draws the dials and the digital displays with ImGui's draw lists, and moves each needle smoothly toward its value. |
 | Simulator | `sim/` | `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal: the fixture of the tests and the core of `elm327sim`. |
 
 ## Building and testing
@@ -308,9 +339,10 @@ ctest --preset gcc-debug
 
 The tests (`build/<preset>/tests/elm327_tests [name-filter]`) cover the parsing and decoding, run
 the adapter, the controller and every command of the command line and the shell against the
-simulated adapter, drive the shell on a pseudo-terminal like a person at a keyboard, and run the
-GUI's worker thread. Run the `asan` and `tsan` presets after changing anything that waits, reads or
-uses threads. The `tidy` preset needs `sudo apt install clang-tidy`.
+simulated adapter, drive the shell on a pseudo-terminal like a person at a keyboard, run the GUI's
+worker thread, and check the scales and the layout of the gauges of widget mode. Run the `asan` and
+`tsan` presets after changing anything that waits, reads or uses threads. The `tidy` preset needs
+`sudo apt install clang-tidy`.
 
 ## Rules
 
