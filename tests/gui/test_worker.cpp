@@ -256,3 +256,29 @@ TEST_CASE(worker_reports_failures) {
     worker->stop();
     worker->stop();  // Twice is fine.
 }
+
+TEST_CASE(worker_read_only_refuses_writes) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const auto worker = std::make_unique<Worker>();
+    REQUIRE(common::is_ok(worker->start(nullptr, nullptr)));
+
+    Request connect{connect_request(fake.device_path())};
+    connect.read_only = true;
+    REQUIRE(worker->post(connect));
+    REQUIRE(wait_for(*worker, [](const State& state) { return state.pids_known && idle(state); }));
+    CHECK(worker->state().read_only);
+
+    // A UDS write typed into the terminal is refused before it is sent.
+    Request raw{};
+    raw.kind = RequestKind::kRaw;
+    static_cast<void>(raw.command.append("2EF19001"));
+    REQUIRE(worker->post(raw));
+    REQUIRE(wait_for(*worker, [](const State& state) { return state.message_failed && idle(state); }));
+    CHECK(test::string_of(worker->state().message.text()).find("read-only") != std::string::npos);
+
+    worker->stop();
+    for (const std::string& command : fake.commands()) {
+        CHECK(command.substr(0U, 2U) != "2E");  // The write never reached the vehicle.
+    }
+}

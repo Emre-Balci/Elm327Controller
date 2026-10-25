@@ -127,13 +127,14 @@ TEST_CASE(shell_settings) {
                        "Interval     50 ms\n"
                        "Count        2\n"
                        "Verbose      on\n"
+                       "Read-only    off\n"
                        "Connection   not connected\n"));
     // A new baud rate closed the connection; the monitor connected again, at the old one.
     CHECK(contains(outcome.err, "Disconnected: the next command connects with the new setting.\n"));
     CHECK(contains(outcome.err, "elm327ctl: 2 samples, 0 failed reads\n"));
     CHECK(contains(outcome.err, "-> 010C\n"));  // verbose on.
     CHECK(contains(outcome.out, "Protocol     6 (ISO 15765-4 CAN (11 bit ID, 500 kbaud))\n"));
-    CHECK(contains(outcome.out, "Count        2\nVerbose      off\nConnection   not connected\n"));
+    CHECK(contains(outcome.out, "Count        2\nVerbose      off\nRead-only    off\nConnection   not connected\n"));
     CHECK(contains(outcome.out, "Not connected.\n"));
     CHECK(count_of(fake.commands(), "ATZ") == 2U);
 }
@@ -274,4 +275,19 @@ TEST_CASE(shell_on_a_terminal) {
     static_cast<void>(::close(err_descriptor));
     static_cast<void>(::close(terminal));
     static_cast<void>(::close(master));
+}
+
+TEST_CASE(shell_read_only_refuses_writes) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome outcome{run_script({"-d", fake.device_path()},
+                                     "set readonly on\nshow\nraw 04\nuds write 0407 01\nset readonly off\nraw ATRV\n")};
+    CHECK(contains(outcome.out, "Read-only    on\n"));
+    CHECK(contains(outcome.err, "refused in read-only mode"));
+    CHECK(contains(outcome.out, "12.6V"));  // The read after turning read-only off still works.
+    // While read-only was on, no write service ever reached the vehicle.
+    for (const std::string& command : fake.commands()) {
+        CHECK(command.substr(0U, 2U) != "04");
+        CHECK(command.substr(0U, 2U) != "2E");
+    }
 }

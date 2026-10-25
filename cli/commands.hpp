@@ -68,7 +68,19 @@ private:
     [[nodiscard]] std::int32_t run_dtc() noexcept;
     [[nodiscard]] std::int32_t run_vin() noexcept;
     [[nodiscard]] std::int32_t run_raw() noexcept;
+    [[nodiscard]] std::int32_t run_clear() noexcept;
+    [[nodiscard]] std::int32_t run_uds() noexcept;
+    [[nodiscard]] std::int32_t run_uds_write() noexcept;
+    [[nodiscard]] std::int32_t run_uds_reset() noexcept;
+    [[nodiscard]] std::int32_t run_uds_routine() noexcept;
+    [[nodiscard]] std::int32_t run_uds_key() noexcept;
+    [[nodiscard]] std::int32_t run_uds_send() noexcept;
+    [[nodiscard]] std::int32_t run_coding() noexcept;
     [[nodiscard]] std::int32_t run_disconnect() noexcept;
+
+    /// Sends the built UDS request @p command, then prints the decoded reply (a positive response
+    /// and its data, or the named negative response code) under @p label. @return the exit code.
+    [[nodiscard]] std::int32_t send_uds(std::string_view label, std::string_view command) noexcept;
 
     /// Prints "elm327ctl: <what>: <reason>", see explain_failure(). @return the exit code for @p status.
     std::int32_t fail(std::string_view what, common::Status status, const Response& response) noexcept;

@@ -38,6 +38,10 @@ struct Vehicle final {
     std::vector<std::uint16_t> stored_dtcs{};
     std::vector<std::uint16_t> pending_dtcs{};
     std::vector<std::uint16_t> permanent_dtcs{};
+    /// UDS data identifiers (service 22/2E), e.g. 0xF190 (VIN) or an example coding block. A
+    /// WriteDataByIdentifier changes the value here, which lets a test confirm a write took effect,
+    /// and that in read-only mode no write ever arrived.
+    std::map<std::uint16_t, std::vector<std::uint8_t>> data_by_identifier{};
     std::string vin{};
     /// The reply to ATRV.
     std::string voltage{"12.6V"};
@@ -98,6 +102,7 @@ private:
     std::vector<std::string> at_command(const std::string& command);
     std::vector<std::string> obd_request(const std::string& command);
     std::vector<std::vector<std::uint8_t>> vehicle_messages(const std::vector<std::uint8_t>& request);
+    std::vector<std::vector<std::uint8_t>> uds_messages(const std::vector<std::uint8_t>& request);
     std::vector<std::uint8_t> support_bitmap(std::uint8_t base) const;
     bool has_pid_above(std::uint32_t pid) const;
     std::vector<std::vector<std::uint8_t>> dtc_messages(std::uint8_t service,

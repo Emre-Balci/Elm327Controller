@@ -14,10 +14,15 @@
 #include "elm327/adapter/adapter.hpp"
 #include "elm327/controller/explain.hpp"
 #include "elm327/controller/timing.hpp"
+#include "elm327/expert/coding.hpp"
+#include "elm327/expert/uds.hpp"
 #include "elm327/obd/dtc.hpp"
+#include "elm327/obd/message.hpp"
 #include "elm327/obd/pid.hpp"
+#include "elm327/obd/service.hpp"
 #include "elm327/obd/vin.hpp"
 #include "elm327/version.hpp"
+#include "common/protocol/text.hpp"
 
 namespace elm327 {
 namespace cli {
@@ -121,6 +126,7 @@ Session::Session(Console& out, Console& err, const std::int32_t cancel_descripto
 std::int32_t Session::run(const Options& options) noexcept {
     options_ = &options;
     controller_.set_trace(options.verbose ? &trace_to_console : nullptr, err_);
+    controller_.set_access_policy(options.read_only ? AccessPolicy::kReadOnly : AccessPolicy::kReadWrite);
     std::int32_t exit_code{kExitSuccess};
     if (options.command == Command::kConnect) {
         exit_code = connect(*out_);
@@ -193,6 +199,15 @@ std::int32_t Session::dispatch() noexcept {
             break;
         case Command::kRaw:
             exit_code = run_raw();
+            break;
+        case Command::kClear:
+            exit_code = run_clear();
+            break;
+        case Command::kUds:
+            exit_code = run_uds();
+            break;
+        case Command::kCoding:
+            exit_code = run_coding();
             break;
         case Command::kShell:
         case Command::kNone:
@@ -484,6 +499,360 @@ std::int32_t Session::run_raw() noexcept {
         }
     }
     return exit_code;
+}
+
+namespace {
+
+/// Hex bytes collected from the arguments of a uds command, e.g. a DID value or a key.
+using UdsBytes = common::StaticVector<std::uint8_t, expert::kMaxRequestData>;
+
+/// Parses a 16-bit value from one to four hexadecimal digits, e.g. a DID "F190".
+common::Result<std::uint16_t> parse_u16(const common::Span<const char> text) noexcept {
+    return ((!text.empty()) && (text.size() <= 4U))
+               ? common::parse_hex<std::uint16_t>(text)
+               : common::Result<std::uint16_t>::failure(common::Status::kInvalidArgument);
+}
+
+/// Decodes the hexadecimal bytes of options.arguments[from..] (each argument one or more bytes, e.g.
+/// "01 02" or "0102") into one sequence. @return kInvalidArgument for bad hex, kOutOfRange if too long.
+common::Result<UdsBytes> collect_hex_bytes(const Options& options, const std::size_t from) noexcept {
+    UdsBytes bytes{};
+    common::Status status{common::Status::kOk};
+    for (std::size_t index{from}; is_ok(status) && (index < options.arguments.size()); ++index) {
+        std::array<std::uint8_t, expert::kMaxRequestData> buffer{};
+        const common::Result<std::size_t> count{
+            common::decode_hex_bytes(options.arguments[index], common::Span<std::uint8_t>{buffer.data(), buffer.size()})};
+        if (!count.has_value()) {
+            status = count.status();
+        }
+        for (std::size_t offset{0U}; is_ok(status) && (offset < count.value_or(0U)); ++offset) {
+            if (!bytes.push_back(buffer[offset])) {
+                status = common::Status::kOutOfRange;
+            }
+        }
+    }
+    return is_ok(status) ? common::Result<UdsBytes>::success(bytes) : common::Result<UdsBytes>::failure(status);
+}
+
+constexpr std::array<std::string_view, 14U> kUdsHelp{{
+    "uds talks to an ECU with UDS (ISO 14229) or KWP2000. Set the ECU's header first if it is not",
+    "the default, e.g. 'raw ATSH7E0', then:",
+    "  uds read DID              ReadDataByIdentifier, e.g. 'uds read F190' (the VIN)",
+    "  uds write DID VALUE...    WriteDataByIdentifier (coding); reads the old value first, needs -y",
+    "  uds session HEX           DiagnosticSessionControl, e.g. 'uds session 03' (extended)",
+    "  uds reset hard|soft|keyoffon   ECUReset",
+    "  uds routine start|stop|poll ROUTINE [DATA...]   RoutineControl",
+    "  uds seed LEVEL            SecurityAccess requestSeed, e.g. 'uds seed 01'",
+    "  uds key LEVEL KEY...      SecurityAccess sendKey (compute the key with your own tooling)",
+    "  uds tester               TesterPresent",
+    "  uds send HEX...          send an arbitrary request, e.g. 'uds send 22 F1 90'",
+    "The reads are allowed in read-only mode; the writes (write, session, reset, routine, key) are",
+    "refused there before anything is sent. A wrong coding value can disturb a module: back up the",
+    "value you read, change one field, and keep the original to restore it.",
+}};
+
+}  // namespace
+
+std::int32_t Session::run_clear() noexcept {
+    if (controller_.read_only()) {
+        const common::Status status{controller_.clear_dtcs()};  // Refused by the gate; report it.
+        return fail("clearing the DTCs", status, controller_.last_response());
+    }
+    if (!options_->yes) {
+        err_->print(Line{}.text(kProgram).text(
+            ": clear erases the stored and pending DTCs, the freeze frames and the readiness monitors"));
+        err_->print("Pass -y (or --yes) to confirm.");
+        return kExitFailure;
+    }
+    common::Status status{controller_.connect_vehicle()};
+    std::int32_t exit_code{is_ok(status) ? kExitSuccess
+                                         : fail("connecting to the vehicle", status, controller_.last_response())};
+    if (is_ok(status)) {
+        status = controller_.clear_dtcs();
+        if (is_ok(status)) {
+            out_->print("Cleared the DTCs and turned the MIL off.");
+        } else {
+            exit_code = fail("clearing the DTCs", status, controller_.last_response());
+        }
+    }
+    return exit_code;
+}
+
+std::int32_t Session::send_uds(const std::string_view label, const std::string_view command) noexcept {
+    const common::Status status{controller_.execute(command, response_)};
+    if (!is_ok(status)) {
+        return fail(label, status, response_);  // Includes the read-only refusal (kPermissionDenied).
+    }
+    if (is_error(response_.reply())) {
+        Line line{};
+        line.text(kProgram).text(": ").text(label).text(": ");
+        append_reason(line, status_of(response_.reply()), response_);
+        err_->print(line);
+        return kExitFailure;
+    }
+    MessageList messages{};
+    if ((!is_ok(parse_messages(response_, messages))) || messages.empty()) {
+        // Not a message this can assemble (e.g. an "OK" to an AT command): show the raw lines.
+        for (std::size_t row{0U}; row < response_.size(); ++row) {
+            out_->print(Line{}.text(response_.line(row)));
+        }
+        return kExitSuccess;
+    }
+    const common::Result<expert::UdsReply> reply{expert::parse_uds_reply(messages[0U].bytes())};
+    if (!reply.has_value()) {
+        return fail(label, reply.status(), response_);
+    }
+    std::int32_t exit_code{kExitSuccess};
+    if (reply.value().positive) {
+        Line line{};
+        line.text(label).text(": ").text(std::string_view{expert::uds_service_name(reply.value().service)}).text(" ok");
+        out_->print(line);
+        if (!reply.value().data.empty()) {
+            out_->print(Line{}.text("  data  ").hex_bytes(reply.value().data));
+        }
+    } else {
+        Line line{};
+        line.text(kProgram).text(": ").text(label).text(": negative response, ");
+        line.text(std::string_view{expert::nrc_name(reply.value().nrc)}).text(" (0x").hex(reply.value().nrc, 2U);
+        line.character(')');
+        err_->print(line);
+        exit_code = kExitFailure;
+    }
+    return exit_code;
+}
+
+std::int32_t Session::run_uds() noexcept {
+    const common::Span<const char> sub{options_->arguments[0U]};
+    const std::size_t count{options_->arguments.size()};
+    expert::UdsCommand command{};
+    std::int32_t exit_code{kExitUsage};
+    if (common::equals(sub, "help")) {
+        for (const std::string_view line : kUdsHelp) {
+            out_->print(line);
+        }
+        return kExitSuccess;
+    }
+    // Every other subcommand talks to an ECU: connect first if the shell has not already.
+    if (!controller_.connected()) {
+        const std::int32_t connect_code{connect(*err_)};
+        if (connect_code != kExitSuccess) {
+            return connect_code;
+        }
+    }
+    if (common::equals(sub, "tester")) {
+        static_cast<void>(expert::uds_tester_present(command));
+        exit_code = send_uds("tester present", command.view());
+    } else if (common::equals(sub, "read")) {
+        const common::Result<std::uint16_t> did{(count == 2U) ? parse_u16(options_->arguments[1U])
+                                                              : common::Result<std::uint16_t>::failure(
+                                                                    common::Status::kInvalidArgument)};
+        if (!did.has_value()) {
+            err_->print(Line{}.text(kProgram).text(": uds read DID, e.g. 'uds read F190'"));
+        } else {
+            static_cast<void>(expert::uds_read_data_by_identifier(did.value(), command));
+            exit_code = send_uds("read", command.view());
+        }
+    } else if (common::equals(sub, "write")) {
+        exit_code = run_uds_write();
+    } else if (common::equals(sub, "session")) {
+        const common::Result<std::uint8_t> session{(count == 2U) ? parse_pid(options_->arguments[1U])
+                                                                 : common::Result<std::uint8_t>::failure(
+                                                                       common::Status::kInvalidArgument)};
+        if (!session.has_value()) {
+            err_->print(Line{}.text(kProgram).text(": uds session HEX, e.g. 'uds session 03'"));
+        } else {
+            const std::array<std::uint8_t, 1U> payload{{session.value()}};
+            static_cast<void>(expert::uds_request(expert::service_id(expert::UdsService::kDiagnosticSessionControl),
+                                                   payload, command));
+            exit_code = send_uds("session", command.view());
+        }
+    } else if (common::equals(sub, "reset")) {
+        exit_code = run_uds_reset();
+    } else if (common::equals(sub, "routine")) {
+        exit_code = run_uds_routine();
+    } else if (common::equals(sub, "seed")) {
+        const common::Result<std::uint8_t> level{(count == 2U) ? parse_pid(options_->arguments[1U])
+                                                               : common::Result<std::uint8_t>::failure(
+                                                                     common::Status::kInvalidArgument)};
+        if (!level.has_value()) {
+            err_->print(Line{}.text(kProgram).text(": uds seed LEVEL, e.g. 'uds seed 01'"));
+        } else {
+            static_cast<void>(expert::uds_security_request_seed(level.value(), command));
+            exit_code = send_uds("security seed", command.view());
+        }
+    } else if (common::equals(sub, "key")) {
+        exit_code = run_uds_key();
+    } else if (common::equals(sub, "send")) {
+        exit_code = run_uds_send();
+    } else {
+        err_->print(Line{}.text(kProgram).text(": unknown uds subcommand (try 'uds help')"));
+    }
+    return exit_code;
+}
+
+std::int32_t Session::run_uds_write() noexcept {
+    if (options_->arguments.size() < 3U) {
+        err_->print(Line{}.text(kProgram).text(": uds write DID VALUE..., e.g. 'uds write 0407 01'"));
+        return kExitUsage;
+    }
+    const common::Result<std::uint16_t> did{parse_u16(options_->arguments[1U])};
+    const common::Result<UdsBytes> value{collect_hex_bytes(*options_, 2U)};
+    if ((!did.has_value()) || (!value.has_value())) {
+        err_->print(Line{}.text(kProgram).text(": uds write needs a DID (1-4 hex digits) and hex bytes"));
+        return kExitUsage;
+    }
+    if ((!controller_.read_only()) && (!options_->yes)) {
+        err_->print(Line{}.text(kProgram).text(
+            ": uds write codes the ECU; it reads the old value first, then writes. Pass -y to confirm"));
+        return kExitFailure;
+    }
+    const UdsBytes bytes{value.value()};
+    const common::Span<const std::uint8_t> value_span{bytes.data(), bytes.size()};
+    // Back up: show the current value before the write (skipped when read-only will refuse the write).
+    if (!controller_.read_only()) {
+        expert::UdsCommand read_command{};
+        if (expert::uds_read_data_by_identifier(did.value(), read_command)) {
+            static_cast<void>(send_uds("current value", read_command.view()));
+        }
+    }
+    expert::UdsCommand command{};
+    if (!expert::uds_write_data_by_identifier(did.value(), value_span, command)) {
+        err_->print(Line{}.text(kProgram).text(": the value is too long for one request"));
+        return kExitUsage;
+    }
+    const std::int32_t exit_code{send_uds("write", command.view())};
+    if ((exit_code == kExitSuccess) && (!controller_.read_only())) {
+        expert::UdsCommand read_command{};
+        if (expert::uds_read_data_by_identifier(did.value(), read_command)) {
+            static_cast<void>(send_uds("new value", read_command.view()));
+        }
+    }
+    return exit_code;
+}
+
+std::int32_t Session::run_uds_reset() noexcept {
+    expert::EcuReset type{expert::EcuReset::kSoftReset};
+    bool known{options_->arguments.size() == 2U};
+    if (known) {
+        const common::Span<const char> kind{options_->arguments[1U]};
+        if (common::equals(kind, "hard")) {
+            type = expert::EcuReset::kHardReset;
+        } else if (common::equals(kind, "soft")) {
+            type = expert::EcuReset::kSoftReset;
+        } else if (common::equals(kind, "keyoffon")) {
+            type = expert::EcuReset::kKeyOffOnReset;
+        } else {
+            known = false;
+        }
+    }
+    std::int32_t exit_code{kExitUsage};
+    if (!known) {
+        err_->print(Line{}.text(kProgram).text(": uds reset hard|soft|keyoffon"));
+    } else {
+        expert::UdsCommand command{};
+        static_cast<void>(expert::uds_ecu_reset(type, command));
+        exit_code = send_uds("ecu reset", command.view());
+    }
+    return exit_code;
+}
+
+std::int32_t Session::run_uds_routine() noexcept {
+    expert::RoutineControlType type{expert::RoutineControlType::kStart};
+    bool ok{options_->arguments.size() >= 3U};
+    if (ok) {
+        const common::Span<const char> kind{options_->arguments[1U]};
+        if (common::equals(kind, "start")) {
+            type = expert::RoutineControlType::kStart;
+        } else if (common::equals(kind, "stop")) {
+            type = expert::RoutineControlType::kStop;
+        } else if (common::equals(kind, "poll")) {
+            type = expert::RoutineControlType::kRequestResults;
+        } else {
+            ok = false;
+        }
+    }
+    const common::Result<std::uint16_t> routine{ok ? parse_u16(options_->arguments[2U])
+                                                   : common::Result<std::uint16_t>::failure(
+                                                         common::Status::kInvalidArgument)};
+    const common::Result<UdsBytes> data{collect_hex_bytes(*options_, 3U)};
+    std::int32_t exit_code{kExitUsage};
+    if ((!ok) || (!routine.has_value()) || (!data.has_value())) {
+        err_->print(Line{}.text(kProgram).text(": uds routine start|stop|poll ROUTINE [DATA...]"));
+    } else {
+        const UdsBytes bytes{data.value()};
+        expert::UdsCommand command{};
+        static_cast<void>(expert::uds_routine_control(type, routine.value(),
+                                                      common::Span<const std::uint8_t>{bytes.data(), bytes.size()},
+                                                      command));
+        exit_code = send_uds("routine", command.view());
+    }
+    return exit_code;
+}
+
+std::int32_t Session::run_uds_key() noexcept {
+    const common::Result<std::uint8_t> level{(options_->arguments.size() >= 3U) ? parse_pid(options_->arguments[1U])
+                                                                                : common::Result<std::uint8_t>::failure(
+                                                                                      common::Status::kInvalidArgument)};
+    const common::Result<UdsBytes> key{collect_hex_bytes(*options_, 2U)};
+    std::int32_t exit_code{kExitUsage};
+    if ((!level.has_value()) || (!key.has_value())) {
+        err_->print(Line{}.text(kProgram).text(": uds key LEVEL KEY..., e.g. 'uds key 02 11 22 33 44'"));
+    } else {
+        const UdsBytes bytes{key.value()};
+        expert::UdsCommand command{};
+        static_cast<void>(expert::uds_security_send_key(level.value(),
+                                                        common::Span<const std::uint8_t>{bytes.data(), bytes.size()},
+                                                        command));
+        exit_code = send_uds("security key", command.view());
+    }
+    return exit_code;
+}
+
+std::int32_t Session::run_uds_send() noexcept {
+    const common::Result<UdsBytes> request{collect_hex_bytes(*options_, 1U)};
+    std::int32_t exit_code{kExitUsage};
+    if ((!request.has_value()) || request.value().empty()) {
+        err_->print(Line{}.text(kProgram).text(": uds send HEX..., e.g. 'uds send 22 F1 90'"));
+    } else {
+        const UdsBytes bytes{request.value()};
+        expert::UdsCommand command{};
+        const common::Span<const std::uint8_t> payload{bytes.data() + 1U, bytes.size() - 1U};
+        static_cast<void>(expert::uds_request(bytes[0U], payload, command));
+        exit_code = send_uds("uds", command.view());
+    }
+    return exit_code;
+}
+
+std::int32_t Session::run_coding() noexcept {
+    const common::Span<const expert::CodingHint> catalog{expert::coding_catalog()};
+    bool filtered{!options_->arguments.empty()};
+    expert::Make wanted{expert::Make::kVag};
+    if (filtered) {
+        const common::Span<const char> make{options_->arguments[0U]};
+        if (common::equals(make, "vag")) {
+            wanted = expert::Make::kVag;
+        } else if (common::equals(make, "renault")) {
+            wanted = expert::Make::kRenault;
+        } else if (common::equals(make, "bmw")) {
+            wanted = expert::Make::kBmw;
+        } else {
+            err_->print(Line{}.text(kProgram).text(": unknown make (use vag, renault or bmw)"));
+            return kExitUsage;
+        }
+    }
+    out_->print("Reference only: identifiers and values differ by model, year and firmware. Read the");
+    out_->print("current value with 'uds read', change one documented field, write it back with 'uds");
+    out_->print("write' (needs -y), and keep the original to restore. Verify against your own vehicle.");
+    for (const expert::CodingHint& hint : catalog) {
+        if ((!filtered) || (hint.make == wanted)) {
+            out_->print("");
+            out_->print(Line{}.text(std::string_view{expert::make_name(hint.make)}).pad(9U).text(hint.feature));
+            out_->print(Line{}.text("  module  ").text(hint.module));
+            out_->print(Line{}.text("  method  ").text(hint.method));
+            out_->print(Line{}.text("  note    ").text(hint.note));
+        }
+    }
+    return kExitSuccess;
 }
 
 std::int32_t Session::fail(const std::string_view what, const common::Status status,

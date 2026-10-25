@@ -239,7 +239,7 @@ void Worker::run() noexcept {
 void Worker::handle(const Request& request) noexcept {
     switch (request.kind) {
         case RequestKind::kConnect:
-            connect(request.settings);
+            connect(request.settings, request.read_only);
             break;
         case RequestKind::kDisconnect:
             disconnect();
@@ -278,10 +278,12 @@ void Worker::handle(const Request& request) noexcept {
     }
 }
 
-void Worker::connect(const ConnectionSettings& settings) noexcept {
+void Worker::connect(const ConnectionSettings& settings, const bool read_only) noexcept {
     begin(Activity::kConnecting);
     forget();
     state_.settings = settings;
+    state_.read_only = read_only;
+    controller_.set_access_policy(read_only ? AccessPolicy::kReadOnly : AccessPolicy::kReadWrite);
     const common::Status status{controller_.connect(settings)};
     MessageText text{};
     if (is_ok(status)) {

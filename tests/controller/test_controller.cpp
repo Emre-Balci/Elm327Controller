@@ -311,3 +311,72 @@ TEST_CASE(signals_take_stop_requests) {
     CHECK(second == SIGINT);
     CHECK(received == 0);
 }
+
+TEST_CASE(controller_clears_dtcs_when_writable) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    elm327::Controller controller{};
+    REQUIRE(common::is_ok(controller.connect(settings_for(fake))));
+    REQUIRE(common::is_ok(controller.connect_vehicle()));
+    CHECK(controller.access_policy() == elm327::AccessPolicy::kReadWrite);  // The default.
+
+    elm327::DtcList before{};
+    REQUIRE(common::is_ok(controller.read_dtcs(elm327::DtcKind::kStored, before)));
+    CHECK(!before.empty());
+
+    CHECK(common::is_ok(controller.clear_dtcs()));
+    elm327::DtcList after{};
+    REQUIRE(common::is_ok(controller.read_dtcs(elm327::DtcKind::kStored, after)));
+    CHECK(after.empty());
+    CHECK(count_of(fake.commands(), "04") == 1U);  // The clear request reached the vehicle once.
+}
+
+TEST_CASE(controller_read_only_blocks_every_write) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    elm327::Controller controller{};
+    REQUIRE(common::is_ok(controller.connect(settings_for(fake))));
+    controller.set_access_policy(elm327::AccessPolicy::kReadOnly);
+    CHECK(controller.read_only());
+
+    // clear_dtcs() is refused before anything is sent.
+    CHECK(controller.clear_dtcs() == common::Status::kPermissionDenied);
+
+    // A raw OBD clear and UDS writes are refused, and the response is left empty.
+    elm327::Response response{};
+    CHECK(controller.execute("04", response) == common::Status::kPermissionDenied);
+    CHECK(response.empty());
+    CHECK(controller.execute("2EF19001", response) == common::Status::kPermissionDenied);
+    CHECK(controller.execute("3101FF00", response) == common::Status::kPermissionDenied);
+    CHECK(controller.execute("2701", response) == common::Status::kPermissionDenied);
+
+    // Reads still work: an AT command, an OBD read and a UDS read.
+    CHECK(common::is_ok(controller.execute("ATRV", response)));
+    CHECK(common::is_ok(controller.execute("22F190", response)));
+
+    // The decisive check: no write service ever reached the simulated vehicle.
+    for (const std::string& command : fake.commands()) {
+        const std::string service{command.substr(0U, 2U)};
+        CHECK(service != "04");
+        CHECK(service != "2E");
+        CHECK(service != "31");
+        CHECK(service != "27");
+        CHECK(service != "2F");
+    }
+}
+
+TEST_CASE(controller_read_only_allows_reads) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    elm327::Controller controller{};
+    REQUIRE(common::is_ok(controller.connect(settings_for(fake))));
+    controller.set_access_policy(elm327::AccessPolicy::kReadOnly);
+    REQUIRE(common::is_ok(controller.ensure_supported_pids()));
+
+    const elm327::PidReading speed{controller.read_pid(0x0DU)};
+    CHECK(common::is_ok(speed.status));
+    elm327::DtcList dtcs{};
+    CHECK(common::is_ok(controller.read_dtcs(elm327::DtcKind::kStored, dtcs)));
+    elm327::Vin vin{};
+    CHECK(common::is_ok(controller.read_vin(vin)));
+}

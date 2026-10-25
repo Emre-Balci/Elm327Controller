@@ -72,6 +72,13 @@ public:
     ///         the request; otherwise the errors of request() and decode_dtcs().
     common::Status read_dtcs(DtcKind kind, DtcList& dtcs) noexcept;
 
+    /// Clears the stored and pending DTCs and turns the MIL off (service 04). The ECU also drops the
+    /// freeze frames and resets the readiness monitors. There is no read-only guard here: the caller
+    /// (Controller) decides whether a write is allowed.
+    /// @return kOk when an ECU acknowledged ("44"); kNotFound when none answered ("NO DATA");
+    ///         kNotSupported when an ECU rejected the request; otherwise the errors of request().
+    common::Status clear_dtcs() noexcept;
+
     /// Reads the vehicle identification number. @return kOk; otherwise the errors of request() and
     /// decode_vin().
     common::Status read_vin(Vin& vin) noexcept;

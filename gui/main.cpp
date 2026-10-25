@@ -48,7 +48,7 @@ constexpr std::int32_t kExitSuccess{0};
 constexpr std::int32_t kExitFailure{1};
 constexpr std::int32_t kExitUsage{2};
 
-constexpr std::array<std::string_view, 22U> kUsage{{
+constexpr std::array<std::string_view, 23U> kUsage{{
     "Usage: elm327gui [options]",
     "",
     "Graphical front-end for ELM327 OBD-II adapters: live data with plots, trouble codes, the VIN,",
@@ -63,6 +63,7 @@ constexpr std::array<std::string_view, 22U> kUsage{{
     "  -m, --monitor PIDS    connect and monitor these PIDs, e.g. 0C,0D,05",
     "  -i, --interval MS     time between the samples of the monitor (default 1000)",
     "  -w, --widgets         widget mode: the live data as the gauges of a dashboard",
+    "  -r, --read-only       safe mode: refuse anything that could change the vehicle",
     "      --tab NAME        open the tab live, codes, vehicle or terminal",
     "      --screenshot FILE save the window as a PPM image once it is idle, then exit",
     "  -h, --help            show this help",
@@ -230,6 +231,8 @@ bool apply_option(const std::string_view name, const char* const value, Argument
         start.connect = true;
     } else if ((name == "-w") || (name == "--widgets")) {
         start.widgets = true;
+    } else if ((name == "-r") || (name == "--read-only")) {
+        start.read_only = true;
     } else if ((name == "-h") || (name == "--help")) {
         arguments.help = true;
     } else if (name == "--version") {

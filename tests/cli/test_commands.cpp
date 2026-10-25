@@ -279,3 +279,85 @@ TEST_CASE(cli_interrupted_while_connecting) {
     CHECK(outcome.out.empty());
     CHECK(outcome.err == "elm327ctl: connecting to the vehicle: interrupted\n");
 }
+
+TEST_CASE(cli_read_only_blocks_raw_write) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome outcome{run_cli({"-d", fake.device_path(), "-r", "raw", "ATRV", "04"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(outcome.out, "12.6V"));  // The read command still went through.
+    CHECK(contains(outcome.err, "04: refused in read-only mode"));
+}
+
+TEST_CASE(cli_clear_needs_confirmation_and_clears) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome unconfirmed{run_cli({"-d", fake.device_path(), "clear"})};
+    CHECK(unconfirmed.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(unconfirmed.err, "Pass -y"));
+
+    const Outcome cleared{run_cli({"-d", fake.device_path(), "-y", "clear"})};
+    CHECK(cleared.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(cleared.out, "Cleared the DTCs"));
+}
+
+TEST_CASE(cli_clear_refused_in_read_only) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome outcome{run_cli({"-d", fake.device_path(), "-r", "-y", "clear"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(outcome.err, "refused in read-only mode"));
+    for (const std::string& command : fake.commands()) {
+        CHECK(command.substr(0U, 2U) != "04");  // The clear never reached the vehicle.
+    }
+}
+
+TEST_CASE(cli_uds_read_and_write_with_backup) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome read{run_cli({"-d", fake.device_path(), "uds", "read", "0407"})};
+    CHECK(read.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(read.out, "ReadDataByIdentifier ok"));
+
+    const Outcome written{run_cli({"-d", fake.device_path(), "-y", "uds", "write", "0407", "01"})};
+    CHECK(written.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(written.out, "current value"));  // Reads and shows the old value first.
+    CHECK(contains(written.out, "WriteDataByIdentifier ok"));
+    CHECK(contains(written.out, "new value"));
+}
+
+TEST_CASE(cli_uds_write_refused_in_read_only) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome outcome{run_cli({"-d", fake.device_path(), "-r", "uds", "write", "0407", "01"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(outcome.err, "refused in read-only mode"));
+    for (const std::string& command : fake.commands()) {
+        CHECK(command.substr(0U, 2U) != "2E");  // The write never reached the vehicle.
+    }
+}
+
+TEST_CASE(cli_uds_help) {
+    const Outcome outcome{run_cli({"-d", "/dev/null", "uds", "help"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitSuccess);  // 'help' needs no adapter.
+    CHECK(contains(outcome.out, "uds read DID"));
+    CHECK(contains(outcome.out, "refused there before anything is sent"));
+}
+
+TEST_CASE(cli_coding_catalog) {
+    const Outcome all{run_cli({"coding"})};
+    CHECK(all.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(all.out, "Reference only"));
+    CHECK(contains(all.out, "VAG"));
+    CHECK(contains(all.out, "Renault"));
+    CHECK(contains(all.out, "BMW"));
+
+    const Outcome bmw{run_cli({"coding", "bmw"})};
+    CHECK(bmw.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(bmw.out, "BMW"));
+    CHECK(!contains(bmw.out, "VAG"));
+
+    const Outcome bad{run_cli({"coding", "ferrari"})};
+    CHECK(bad.exit_code == elm327::cli::kExitUsage);
+    CHECK(contains(bad.err, "unknown make"));
+}

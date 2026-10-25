@@ -68,6 +68,8 @@ enum class RequestKind : std::uint8_t {
 struct Request final {
     RequestKind kind{RequestKind::kStop};
     ConnectionSettings settings{};
+    /// kConnect: connect in read-only mode (refuse anything that could change the vehicle).
+    bool read_only{false};
     common::ByteSet pids{};
     common::Duration interval{kDefaultInterval};
     common::StaticString<Adapter::kMaxCommandLength> command{};
@@ -108,6 +110,8 @@ struct State final {
     std::uint64_t version{0U};
     Activity activity{Activity::kIdle};
     bool connected{false};
+    /// Read-only mode is in effect: writes to the vehicle are refused (see Controller).
+    bool read_only{false};
     /// The settings of the connection, or of the last attempt.
     ConnectionSettings settings{};
     AdapterText identity{};
@@ -228,7 +232,7 @@ private:
     // The functions below run on the worker's thread.
     void run() noexcept;
     void handle(const Request& request) noexcept;
-    void connect(const ConnectionSettings& settings) noexcept;
+    void connect(const ConnectionSettings& settings, bool read_only) noexcept;
     void disconnect() noexcept;
     /// @return true if the vehicle answered.
     bool read_info() noexcept;

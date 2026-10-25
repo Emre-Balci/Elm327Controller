@@ -54,6 +54,8 @@ struct StartOptions final {
     Tab tab{Tab::kLive};
     /// Start in widget mode: the live data as gauges.
     bool widgets{false};
+    /// Start in read-only mode: refuse anything that could change the vehicle.
+    bool read_only{false};
 };
 
 class App final {
@@ -127,6 +129,7 @@ private:
     std::array<char, ConnectionSettings::kMaxDeviceLength + 1U> device_{};
     std::int32_t baud_index_{0};
     std::int32_t protocol_index_{0};
+    bool read_only_{false};  ///< Connect in read-only mode; toggled by the connection bar.
     std::array<common::StaticString<64U>, 13U> protocol_labels_{};
     std::array<const char*, 13U> protocol_items_{};
     std::array<common::StaticString<ConnectionSettings::kMaxDeviceLength>, 24U> detected_{};

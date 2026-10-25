@@ -10,12 +10,14 @@ add_executable(elm327_tests
     cli/test_options.cpp
     cli/test_shell.cpp
     controller/test_controller.cpp
+    expert/test_uds.cpp
     gui/test_gauge.cpp
     gui/test_worker.cpp
     obd/test_client.cpp
     obd/test_dtc.cpp
     obd/test_message.cpp
     obd/test_pid.cpp
+    obd/test_service.cpp
     obd/test_vin.cpp)
 
 # test_framework.hpp and test_support.hpp live here; tests in group subdirectories include them by name.

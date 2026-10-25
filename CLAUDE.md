@@ -8,9 +8,18 @@ used.
 ## Layout
 - `lib/`: the static library. Headers in `lib/include/elm327/<group>/`, sources in
   `lib/src/<group>/`: `adapter` talks to the ELM327 over the serial port; `obd` holds the OBD-II
-  services (messages, PIDs, DTCs, VIN, `ObdClient`); `controller` holds `Controller`, the
-  connection the front-ends share, with `explain.hpp` (failures in words), `signals.hpp`
-  (`StopSignals`) and `timing.hpp` (periodic reads). Logic both front-ends need belongs here.
+  services (messages, PIDs, DTCs, VIN, `ObdClient` with `clear_dtcs()`) and `service.hpp`, which
+  classifies a request as read or write for the read-only gate; `expert` holds `uds.hpp` (building
+  and decoding UDS/KWP requests) and `coding.hpp` (a reference map for VAG/Renault/BMW, no
+  car-specific values); `controller` holds `Controller`, the connection the front-ends share, with
+  its `AccessPolicy` (the read-only safety mode, enforced in `execute()` and `clear_dtcs()`),
+  `explain.hpp` (failures in words), `signals.hpp` (`StopSignals`) and `timing.hpp` (periodic
+  reads). Logic both front-ends need belongs here.
+- Read-only mode and expert mode: the gate lives in `obd/service.hpp` (`command_access()`,
+  default-deny) and `Controller` (`set_access_policy()`), so every front-end -- `raw`, `clear`,
+  `uds`, the GUI terminal -- is covered at one choke point. Expert mode is the UDS/KWP toolkit in
+  `expert/`; keep it protocol-only, with ECU-specific data left to the user, and never add odometer,
+  immobiliser or emissions-defeat functions.
 - `cli/`: `elm327ctl`. Everything but `main.cpp` is the `elm327ctl_core` library, so the tests can
   run commands and the shell in-process. `commands` runs the commands over a `Controller`
   (`Session`), `shell` the interactive loop, `terminal` reads lines (raw mode on a terminal),
@@ -21,7 +30,10 @@ used.
   (also in `elm327gui_core`, no ImGui) holds the scale of every dial and plans the layout, so a new
   dial is a row in its table plus a test; `dashboard` draws them.
 - `sim/`: `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal, and the `elm327sim`
-  tool. Extend it whenever the library learns a new command, so the tests can cover it.
+  tool. It answers OBD-II (service 01/03/04/07/09/0A) and a subset of UDS (sessions, read/write data
+  by identifier, routine, security, tester present, reset) with data identifiers in
+  `Vehicle::data_by_identifier`, so a read-only test can confirm no write ever reaches it. Extend it
+  whenever the library learns a new command, so the tests can cover it.
 - `tests/<group>/`, `tests/cli/`, `tests/gui/`: tests with the same minimal framework as Common's.
 - `third_party/common`: the Common library as a git submodule. Do not edit it here: changes to
   Common go to its own repository (`/mnt/d/Repos/Common`), and this repository then moves the

@@ -171,6 +171,7 @@ void App::start(const StartOptions& options) noexcept {
     tab_ = options.tab;
     select_tab_ = true;
     widget_mode_ = options.widgets;
+    read_only_ = options.read_only;
     pending_monitor_ = options.monitor;
     for (std::uint32_t value{1U}; value <= 0xFFU; ++value) {
         selected_[value] = options.monitor.contains(static_cast<std::uint8_t>(value));
@@ -319,6 +320,15 @@ void App::draw_connection() noexcept {
     static_cast<void>(ImGui::Combo("##protocol", &protocol_index_, protocol_items_.data(),
                                    static_cast<int>(protocol_items_.size())));
     ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Read-only", &read_only_)) {
+        if (state.connected) {
+            connect();  // Reconnect so the new access policy takes effect at once.
+        }
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Safe mode: refuse anything that could change the vehicle.");
+    }
     ImGui::SameLine();
     if (state.connected) {
         if (ImGui::Button("Disconnect")) {
@@ -796,6 +806,7 @@ void App::connect() noexcept {
     Request request{};
     request.kind = RequestKind::kConnect;
     request.settings = settings();
+    request.read_only = read_only_;
     static_cast<void>(worker_->post(request));
 }
 

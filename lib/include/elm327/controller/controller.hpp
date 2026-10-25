@@ -34,6 +34,7 @@
 #include "elm327/obd/client.hpp"
 #include "elm327/obd/dtc.hpp"
 #include "elm327/obd/pid.hpp"
+#include "elm327/obd/service.hpp"
 #include "elm327/obd/vin.hpp"
 
 namespace elm327 {
@@ -151,6 +152,24 @@ public:
         adapter_.set_trace(function, context);
     }
 
+    /// Sets the access policy. In AccessPolicy::kReadOnly the Controller refuses, before sending
+    /// anything, every operation that could change the vehicle: clear_dtcs(), and an execute() whose
+    /// command is not a pure read (see command_access()). The reads (query(), the PIDs, the DTCs and
+    /// the VIN) are unaffected. The policy can be changed at any time and takes effect on the next
+    /// operation; it does not touch the connection.
+    void set_access_policy(AccessPolicy policy) noexcept {
+        policy_ = policy;
+    }
+
+    [[nodiscard]] AccessPolicy access_policy() const noexcept {
+        return policy_;
+    }
+
+    /// @return true in AccessPolicy::kReadOnly, the read-only safety mode.
+    [[nodiscard]] bool read_only() const noexcept {
+        return policy_ == AccessPolicy::kReadOnly;
+    }
+
     /// Sends an AT command that answers one line of text, e.g. "ATRV" ("12.6V"), "AT@1" (the
     /// description) or "ATDP" (the protocol), and returns the line in @p text.
     /// @return kOk; kNotSupported if the adapter does not know the command (it answers "?", as
@@ -194,6 +213,13 @@ public:
     /// Reads the DTCs of @p kind. @return the results of ObdClient::read_dtcs().
     common::Status read_dtcs(DtcKind kind, DtcList& dtcs) noexcept;
 
+    /// Clears the stored and pending DTCs and turns the MIL off (OBD-II service 04). This is the one
+    /// write this library performs by itself, and it also resets freeze frames and readiness
+    /// monitors, so a caller should confirm it with the user first.
+    /// @return kPermissionDenied, without sending anything, in read-only mode (see
+    ///         set_access_policy()); otherwise the results of ObdClient::clear_dtcs().
+    common::Status clear_dtcs() noexcept;
+
     /// Reads the VIN. @return the results of ObdClient::read_vin().
     common::Status read_vin(Vin& vin) noexcept;
 
@@ -201,7 +227,12 @@ public:
     /// reply in @p response, waiting as long as the protocol search may take (Timeouts::connect).
     /// After an AT command the supported PIDs are read again before they are needed, since the
     /// command may have reset the adapter or changed its protocol.
-    /// @return the results of Adapter::execute(); the reply may be an error message of the adapter.
+    ///
+    /// In read-only mode a command that is not a pure read (command_access() is not Access::kRead,
+    /// e.g. an OBD service 04 or a UDS write) is refused before anything is sent: @p response is
+    /// cleared and the status is kPermissionDenied. AT commands and read requests are sent as usual.
+    /// @return the results of Adapter::execute(); kPermissionDenied when the read-only gate refused
+    ///         the command; the reply may be an error message of the adapter.
     common::Status execute(std::string_view command, Response& response) noexcept;
 
     /// The reply to the last query() or OBD operation, e.g. "NO DATA" after a failed read_pid():
@@ -222,6 +253,7 @@ private:
     Response response_{};  ///< Replies to query().
     ConnectionSettings settings_{};
     ConnectFailure failure_{ConnectFailure::kNone};
+    AccessPolicy policy_{AccessPolicy::kReadWrite};
     bool knows_pids_{false};
     bool query_last_{false};  ///< last_response() is response_ rather than the ObdClient's.
 };
