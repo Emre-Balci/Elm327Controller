@@ -102,6 +102,9 @@ const char* to_string(const Activity activity) noexcept {
         case Activity::kSendingCommand:
             text = "Sending a command";
             break;
+        case Activity::kTalkingToEcu:
+            text = "Talking to the ECU";
+            break;
     }
     return text;
 }
@@ -271,6 +274,12 @@ void Worker::handle(const Request& request) noexcept {
             break;
         case RequestKind::kRaw:
             send(request);
+            break;
+        case RequestKind::kUds:
+            uds(request);
+            break;
+        case RequestKind::kUdsWrite:
+            uds_write(request);
             break;
         case RequestKind::kStop:
             stopping_ = true;
@@ -520,7 +529,8 @@ void Worker::send(const Request& request) noexcept {
     if (require_connection()) {
         begin(Activity::kSendingCommand);
         const common::Status status{controller_.execute(request.command.view(), response_)};
-        if (!is_ok(status)) {
+        // A failure, or an error message of the adapter, e.g. "?" for a command it does not know.
+        if ((!is_ok(status)) || is_error(response_.reply())) {
             const Explanation explanation{explain_failure(status, response_)};
             MessageText text{};
             put(text, request.command.text());
@@ -530,6 +540,90 @@ void Worker::send(const Request& request) noexcept {
         }
         finish();
     }
+}
+
+void Worker::uds(const Request& request) noexcept {
+    if (require_connection()) {
+        begin(Activity::kTalkingToEcu);
+        static_cast<void>(exchange_uds(request.label.view(), request.command.view()));
+        finish();
+    }
+}
+
+void Worker::uds_write(const Request& request) noexcept {
+    if (require_connection()) {
+        begin(Activity::kTalkingToEcu);
+        expert::UdsCommand read{};
+        expert::UdsCommand write{};
+        const common::Span<const std::uint8_t> value{request.value.data(), request.value.size()};
+        static_cast<void>(expert::uds_read_data_by_identifier(request.did, read));  // Cannot fail: fixed size.
+        if (!expert::uds_write_data_by_identifier(request.did, value, write)) {
+            note(span_of("The value is too long for one request."), true);
+        } else {
+            // Back up first: without the current value there is nothing to restore, so nothing is
+            // written. Read-only mode refuses the write anyway, so it skips the backup.
+            bool may_write{controller_.read_only()};
+            if (!may_write) {
+                may_write = exchange_uds("current value", read.view()) == UdsResult::Outcome::kPositive;
+                if (!may_write) {
+                    note(span_of("Cannot read the current value to back it up, so nothing was written."), true);
+                }
+            }
+            if (may_write) {
+                const UdsResult::Outcome written{exchange_uds("write", write.view())};
+                if ((written == UdsResult::Outcome::kPositive) && (!controller_.read_only())) {
+                    static_cast<void>(exchange_uds("new value", read.view()));  // What the ECU now holds.
+                }
+            }
+        }
+        finish();
+    }
+}
+
+UdsResult::Outcome Worker::exchange_uds(const std::string_view label, const std::string_view command) noexcept {
+    UdsResult result{};
+    const std::size_t label_length{(label.size() < UdsLabel::capacity()) ? label.size() : UdsLabel::capacity()};
+    static_cast<void>(result.label.append(common::Span<const char>{label.data(), label_length}));
+    static_cast<void>(result.request.append(command));  // Cannot fail: a command has at most its capacity.
+    const common::Status status{controller_.execute(command, response_)};
+    if ((!is_ok(status)) || is_error(response_.reply())) {
+        result.outcome = (status == common::Status::kPermissionDenied) ? UdsResult::Outcome::kRefused
+                                                                       : UdsResult::Outcome::kFailed;
+        put(result.reason, explain_failure(status, response_).reason);
+    } else {
+        const common::Status decoded{expert::decode_uds_response(response_, uds_messages_, result.exchange)};
+        if (decoded == common::Status::kNotFound) {
+            put(result.reason, "no reply to decode");
+        } else if (!is_ok(decoded)) {
+            put(result.reason, "unexpected reply (are headers on? ATH0 turns them off)");
+        } else if (result.exchange.positive) {
+            result.outcome = UdsResult::Outcome::kPositive;
+        } else {
+            result.outcome = UdsResult::Outcome::kNegative;
+            put(result.reason, std::string_view{expert::nrc_name(result.exchange.nrc)});
+            put(result.reason, " (0x");
+            static_cast<void>(common::append_hex(result.reason, result.exchange.nrc, 2U));
+            put(result.reason, ")");
+        }
+    }
+    // The status line and the terminal tell the outcome too.
+    MessageText text{};
+    put(text, label);
+    put(text, ": ");
+    if (result.outcome == UdsResult::Outcome::kPositive) {
+        put(text, std::string_view{expert::uds_service_name(result.exchange.service)});
+        put(text, " ok");
+    } else {
+        if (result.outcome == UdsResult::Outcome::kNegative) {
+            put(text, "negative response, ");
+        }
+        put(text, result.reason.text());
+    }
+    note(text.text(), result.outcome != UdsResult::Outcome::kPositive);
+    if (!uds_results_.try_push(result)) {
+        static_cast<void>(dropped_.fetch_add(1U, std::memory_order_relaxed));
+    }
+    return result.outcome;
 }
 
 common::Status Worker::query(const std::string_view command, AdapterText& text) noexcept {

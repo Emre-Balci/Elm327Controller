@@ -197,16 +197,16 @@ elm327ctl -d /dev/pts/5 -r uds write F190 ...   # refused: a UDS write
 ```
 
 The guard lives in the library's `Controller`, below every front-end, so it covers the `clear`
-command, every `raw` and `uds` request, and the GUI's terminal alike. It decides on the service --
-the first byte of an OBD/UDS request -- with a **default-deny** rule in `elm327/obd/service.hpp`: a
-request is allowed only when its service is a known pure read (OBD-II 01, 02, 03, 05, 06, 07, 09, 0A;
-UDS/KWP ReadDataByIdentifier, ReadMemoryByAddress, ReadDTCInformation, TesterPresent and the other
-read services). Everything else -- OBD-II 04 (clear) and 08 (actuator test), every UDS write,
-session change, reset, routine, I/O control or security access, and anything the library does not
-recognise -- is refused before a single byte is sent, with `kPermissionDenied`. `AT` commands
-configure the adapter, not the car, so they are allowed. The classification ignores spaces, so a
-write cannot be slipped past as "0 4". It is unit-tested, and a controller test confirms that with
-read-only on, no write service ever reaches the simulated vehicle.
+command, every `raw` and `uds` request, and the GUI's terminal and Expert tab alike. It decides on
+the service -- the first byte of an OBD/UDS request -- with a **default-deny** rule in
+`elm327/obd/service.hpp`: a request is allowed only when its service is a known pure read (OBD-II 01,
+02, 03, 05, 06, 07, 09, 0A; UDS/KWP ReadDataByIdentifier, ReadMemoryByAddress, ReadDTCInformation,
+TesterPresent and the other read services). Everything else -- OBD-II 04 (clear) and 08 (actuator
+test), every UDS write, session change, reset, routine, I/O control or security access, and anything
+the library does not recognise -- is refused before a single byte is sent, with `kPermissionDenied`.
+`AT` commands configure the adapter, not the car, so they are allowed. The classification ignores
+spaces, so a write cannot be slipped past as "0 4". It is unit-tested, and controller, CLI and GUI
+worker tests confirm that with read-only on, no write service ever reaches the simulated vehicle.
 
 Read-only mode is the safe default to reach for on an unfamiliar car, or when only diagnosing.
 
@@ -215,12 +215,14 @@ Read-only mode is the safe default to reach for on an unfamiliar car, or when on
 Beyond the standard OBD-II services, manufacturers reach their ECUs with UDS (ISO 14229) or the
 older KWP2000 (ISO 14230): the same layer that VCDS and OBDeleven (VAG), ddt4all (Renault/Dacia) and
 BimmerCode (BMW) build on to unlock and change features. `elm327ctl` speaks it with the `uds`
-command. Set the target ECU's header first if it is not the default (`raw ATSH7E0`), then:
+command, and `elm327gui` with its [Expert tab](#the-expert-tab). Set the target ECU's header first if
+it is not the default (`raw ATSH7E0`, or *Target ECU* in the tab), then:
 
 ```
 $ elm327ctl -d /dev/pts/5 uds read F190           # ReadDataByIdentifier (here, the VIN)
 read: ReadDataByIdentifier ok
   data  F1 90 31 44 34 47 50 30 30 52 35 35 42 31 32 33 34 35 36
+  text  "1D4GP00R55B123456"
 
 $ elm327ctl -d /dev/pts/5 -y uds write 0407 01    # WriteDataByIdentifier (coding)
 current value: ReadDataByIdentifier ok             # reads and shows the old value first
@@ -233,10 +235,12 @@ new value: ReadDataByIdentifier ok                 # and reads it back to confir
 `uds help` lists the subcommands: `read DID`, `write DID VALUE...`, `session HEX`, `reset
 hard|soft|keyoffon`, `routine start|stop|poll ROUTINE [DATA...]`, `seed LEVEL`, `key LEVEL KEY...`,
 `tester`, and `send HEX...` for an arbitrary request. Positive replies are named
-(`ReadDataByIdentifier ok`) and negative ones are decoded to their reason (`securityAccessDenied
-(0x33)`). A `write` reads and prints the current value before it writes and re-reads it after, so you
-always have the original to restore. The writes are refused in read-only mode; `read`, `tester` and
-`send` of a read service are not.
+(`ReadDataByIdentifier ok`), a printable value such as a VIN or a part number is shown as text too,
+and negative replies are decoded to their reason (`securityAccessDenied (0x33)`). A `write` first
+reads and prints the current value, and **writes only if it could read it** -- without that backup
+there would be nothing to restore -- then reads the value again to confirm. `tester` asks the ECU for
+an answer (`3E00`), so it also tells whether the ECU is there. The writes are refused in read-only
+mode; `read`, `tester` and `send` of a read service are not.
 
 Security access is framed only: `uds seed` requests a seed and `uds key` sends a key you supply.
 The seed-to-key algorithm of a locked ECU is a manufacturer secret and is **not** included; compute
@@ -273,13 +277,15 @@ the law where you drive.
 ## The GUI
 
 `elm327gui` shows a connection bar (device, with a list of the USB and Bluetooth serial devices
-found; baud rate; protocol) and four tabs:
+found; baud rate; protocol; [Read-only](#read-only-mode)) and five tabs:
 
 - **Live data**: the PIDs the vehicle supports, with their latest values. Ticked PIDs (up to 16)
   are monitored at the chosen interval and plotted, or, in widget mode, shown as gauges.
 - **Trouble codes**: the MIL status and the stored, pending and permanent DTCs.
 - **Vehicle**: the VIN, and what the adapter tells about itself.
 - **Terminal**: the traffic with the adapter, and a line to send AT commands or OBD requests.
+- **Expert**: UDS/KWP requests to an ECU, their results, and the coding reference (see
+  [the Expert tab](#the-expert-tab)).
 
 ```
 Usage: elm327gui [options]
@@ -291,7 +297,8 @@ Usage: elm327gui [options]
   -m, --monitor PIDS    connect and monitor these PIDs, e.g. 0C,0D,05
   -i, --interval MS     time between the samples of the monitor (default 1000)
   -w, --widgets         widget mode: the live data as the gauges of a dashboard
-      --tab NAME        open the tab live, codes, vehicle or terminal
+  -r, --read-only       safe mode: refuse anything that could change the vehicle
+      --tab NAME        open the tab live, codes, vehicle, terminal or expert
       --screenshot FILE save the window as a PPM image once it is idle, then exit
 ```
 
@@ -333,6 +340,31 @@ Without GLFW, CMake leaves the GUI out and says so; the library and `elm327ctl` 
 It needs a display: X11 or Wayland, e.g. WSLg on Windows 11. `--screenshot` renders the window,
 saves it and exits, for documentation and smoke tests.
 
+### The Expert tab
+
+The **Expert** tab (or `--tab expert`) is [expert mode](#expert-mode-uds-kwp-and-coding) in the
+window: what `uds` does on the command line, with the results in a table.
+
+![elm327gui's Expert tab: reads, a coding write with its backup, and a write that was not sent for lack of a backup](docs/elm327gui-expert.png)
+
+- **Target ECU**: the CAN identifier the requests go to (`ATSH`) and the one the replies come from
+  (`ATCRA`, empty for any), e.g. 7E0 and 7E8 for the engine ECU. This only configures the adapter.
+- **Session** (DiagnosticSessionControl) and **Tester present**; **Data identifier**: *Read* a DID
+  (F190, the VIN, to start with) and *Write* a value with the same backup as `uds write` -- the
+  current value is read first, the write goes only if that worked, and the value is read again;
+  **Routine** (start, stop, results); **Security access** (a seed at an odd level, the key at the
+  next one -- the key comes from your own tooling); **ECU reset**; and **Any request** in
+  hexadecimal, which shows how the read-only gate classifies it as you type.
+- **Results**: every request with its outcome -- *ok* with the bytes of the reply (and the text of a
+  printable value such as the VIN), *rejected* with the decoded negative response code, *refused*
+  in read-only mode, or *failed* with the adapter's reason.
+- **Coding reference**: the map of `coding`, by make.
+
+Each request that can change the vehicle first opens a confirmation that names it and what it
+risks, and *Send* stays disabled until you tick that you have backed up what it changes. In
+read-only mode those controls are disabled, and the requests would be refused anyway: the guard is
+in the library, below the window.
+
 ## Connecting an adapter
 
 - USB adapters (FTDI, CH340, PL2303 chips) appear as `/dev/ttyUSB0`. Bluetooth adapters appear as
@@ -356,7 +388,7 @@ saves it and exits, for documentation and smoke tests.
 |---|---|---|
 | Adapter | `elm327/adapter/` | `Adapter` sends a command over the serial port and collects the reply lines up to the `>` prompt, within a deadline and cancellable through a descriptor. After a command was interrupted, the next one waits for its late reply or stops the adapter, so a program can go on after Ctrl+C. `Response` classifies the lines (`OK`, `NO DATA`, `UNABLE TO CONNECT`, `CAN ERROR`, ...). |
 | OBD-II | `elm327/obd/` | `parse_messages()` turns reply lines into vehicle messages, including CAN multi-frame replies. `pid.hpp` names and decodes the service 01 PIDs exactly, `dtc.hpp` and `vin.hpp` decode trouble codes and the VIN in the CAN and the older formats. `ObdClient` runs the requests (and `clear_dtcs()`, service 04). `service.hpp` classifies a request as read or write for the read-only gate. |
-| Expert | `elm327/expert/` | `uds.hpp` builds and decodes UDS (ISO 14229) and KWP2000 requests -- session control, read/write data by identifier, routine control, security access, ECU reset, tester present -- and names the negative response codes. `coding.hpp` is a reference map of common owner codings for VAG, Renault and BMW (no car-specific values). |
+| Expert | `elm327/expert/` | `uds.hpp` builds and decodes UDS (ISO 14229) and KWP2000 requests -- session control, read/write data by identifier, routine control, security access, ECU reset, tester present -- and names the negative response codes. `decode_uds_response()` turns the adapter's reply, multi-frame included, into a `UdsExchange` that owns its bytes; both front-ends use it. `coding.hpp` is a reference map of common owner codings for VAG, Renault and BMW (no car-specific values). |
 | Controller | `elm327/controller/` | `Controller` keeps a connection: it opens and initializes the adapter in one step and tells which step failed, reads the supported PIDs once, notices an unplugged device, and returns PID values that own their bytes. Its access policy enforces [read-only mode](#read-only-mode) on every write. `explain.hpp` puts failures into words, `signals.hpp` stops a program cleanly on Ctrl+C, and `timing.hpp` schedules periodic reads without drift. |
 
 A program uses it like this:
@@ -407,7 +439,7 @@ the result once, half to even, to the resolution of the PID, so `(256 * A + B) /
 |---|---|---|
 | Commands | `cli/commands.hpp` | `Session` runs the commands over a `Controller`: once for the command line, one after the other for the shell. Output goes through `Console`, without stdio. |
 | Shell | `cli/shell.hpp`, `cli/terminal.hpp`, `cli/line_editor.hpp` | The shell reads lines through `LineInput`: in raw mode on a terminal, where `LineEditor` turns the keys into a line, or as plain lines from a pipe. While a command runs the terminal is back in its normal mode, so Ctrl+C reaches the command as SIGINT (through `StopSignals`), and the shell takes the request and goes on. |
-| GUI worker | `gui/worker.hpp` | `Worker` owns the `Controller` on its own thread. The window posts requests through an `SpscQueue`; the worker publishes a `State` snapshot through a `TripleBuffer`, and PID samples and the traffic through two more queues. Nobody waits for anybody; `cancel()` interrupts the operation in progress. |
+| GUI worker | `gui/worker.hpp` | `Worker` owns the `Controller` on its own thread. The window posts requests through an `SpscQueue`; the worker publishes a `State` snapshot through a `TripleBuffer`, and PID samples, the traffic and the results of expert mode (`UdsResult`) through three more queues. Nobody waits for anybody; `cancel()` interrupts the operation in progress. |
 | GUI window | `gui/app.hpp`, `gui/main.cpp` | `App` draws the State with ImGui each frame and turns clicks into requests. `main.cpp` sets up GLFW and the OpenGL 3 backend, and redraws on input, on a result of the worker, or 30 times per second while it works. |
 | Widget mode | `gui/gauge.hpp`, `gui/dashboard.hpp` | `gauge.hpp` knows which PIDs suit a dial and the scale of each (range, ticks, zones, words such as E and F), the geometry of needle and ticks, and plans the layout of a dashboard; it does not draw, so the tests cover it. `Dashboard` draws the dials and the digital displays with ImGui's draw lists, and moves each needle smoothly toward its value. |
 | Simulator | `sim/` | `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal: the fixture of the tests and the core of `elm327sim`. |

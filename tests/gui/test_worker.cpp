@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -281,4 +282,179 @@ TEST_CASE(worker_read_only_refuses_writes) {
     for (const std::string& command : fake.commands()) {
         CHECK(command.substr(0U, 2U) != "2E");  // The write never reached the vehicle.
     }
+}
+
+namespace {
+
+using elm327::gui::UdsResult;
+
+/// Posts @p request and waits until the worker has told @p messages more messages and is idle.
+bool post_and_wait(Worker& worker, const Request& request, const std::uint32_t messages) {
+    static_cast<void>(worker.update_state());
+    const std::uint32_t before{worker.state().message_count};
+    return worker.post(request) && wait_for(worker, [before, messages](const State& state) {
+               return (state.message_count >= (before + messages)) && idle(state);
+           });
+}
+
+Request uds_request(const std::string& label, const std::string& command) {
+    Request request{};
+    request.kind = RequestKind::kUds;
+    static_cast<void>(request.label.append(std::string_view{label}));
+    static_cast<void>(request.command.append(std::string_view{command}));
+    return request;
+}
+
+Request uds_write(const std::uint16_t did, const std::vector<std::uint8_t>& value) {
+    Request request{};
+    request.kind = RequestKind::kUdsWrite;
+    request.did = did;
+    for (const std::uint8_t byte : value) {
+        static_cast<void>(request.value.push_back(byte));
+    }
+    return request;
+}
+
+Request raw_request(const std::string& command) {
+    Request request{};
+    request.kind = RequestKind::kRaw;
+    static_cast<void>(request.command.append(std::string_view{command}));
+    return request;
+}
+
+std::vector<UdsResult> uds_results_of(Worker& worker) {
+    std::vector<UdsResult> results{};
+    UdsResult result{};
+    while (worker.take_uds_result(result)) {
+        results.push_back(result);
+    }
+    return results;
+}
+
+std::vector<std::uint8_t> data_of(const UdsResult& result) {
+    return std::vector<std::uint8_t>{result.exchange.data.begin(), result.exchange.data.end()};
+}
+
+/// Connects @p worker to @p fake and waits until it has read the supported PIDs.
+bool connect_worker(Worker& worker, const elm327::sim::FakeElm327& fake, const bool read_only = false) {
+    Request connect{connect_request(fake.device_path())};
+    connect.read_only = read_only;
+    return common::is_ok(worker.start(nullptr, nullptr)) && worker.post(connect) &&
+           wait_for(worker, [](const State& state) { return state.pids_known && idle(state); });
+}
+
+/// @return true if a request of @p service (two hexadecimal digits) reached the vehicle.
+bool received(const elm327::sim::FakeElm327& fake, const std::string& service) {
+    bool found{false};
+    for (const std::string& command : fake.commands()) {
+        found = found || (command.compare(0U, 2U, service) == 0);
+    }
+    return found;
+}
+
+}  // namespace
+
+TEST_CASE(worker_uds_requests) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const auto worker = std::make_unique<Worker>();
+    REQUIRE(connect_worker(*worker, fake));
+
+    REQUIRE(post_and_wait(*worker, uds_request("read", "22F190"), 1U));
+    REQUIRE(post_and_wait(*worker, uds_request("read", "221234"), 1U));
+    REQUIRE(post_and_wait(*worker, uds_request("tester present", "3E00"), 1U));
+    const std::vector<UdsResult> results{uds_results_of(*worker)};
+    REQUIRE(results.size() == 3U);
+
+    // The VIN, assembled from several CAN frames.
+    CHECK(results[0U].outcome == UdsResult::Outcome::kPositive);
+    CHECK(test::string_of(results[0U].label.text()) == "read");
+    CHECK(test::string_of(results[0U].request.text()) == "22F190");
+    CHECK(results[0U].exchange.service == 0x22U);
+    const std::vector<std::uint8_t> vin{data_of(results[0U])};
+    REQUIRE(vin.size() == 19U);
+    CHECK(vin[2U] == 0x31U);  // '1', the first character.
+
+    // An identifier the ECU does not have.
+    CHECK(results[1U].outcome == UdsResult::Outcome::kNegative);
+    CHECK(results[1U].exchange.nrc == 0x31U);
+    CHECK(test::string_of(results[1U].reason.text()) == "requestOutOfRange (0x31)");
+
+    CHECK(results[2U].outcome == UdsResult::Outcome::kPositive);
+    CHECK(worker->state().message.view() == "tester present: TesterPresent ok");
+    CHECK(!worker->state().message_failed);
+}
+
+TEST_CASE(worker_uds_write_backs_up_first) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const auto worker = std::make_unique<Worker>();
+    REQUIRE(connect_worker(*worker, fake));
+
+    REQUIRE(post_and_wait(*worker, uds_write(0x0407U, {0x01U}), 3U));
+    const std::vector<UdsResult> results{uds_results_of(*worker)};
+    REQUIRE(results.size() == 3U);
+    CHECK(test::string_of(results[0U].label.text()) == "current value");
+    CHECK(data_of(results[0U]) == std::vector<std::uint8_t>({0x04U, 0x07U, 0x00U}));  // The backup.
+    CHECK(test::string_of(results[1U].label.text()) == "write");
+    CHECK(test::string_of(results[1U].request.text()) == "2E040701");
+    CHECK(results[1U].outcome == UdsResult::Outcome::kPositive);
+    CHECK(test::string_of(results[2U].label.text()) == "new value");
+    CHECK(data_of(results[2U]) == std::vector<std::uint8_t>({0x04U, 0x07U, 0x01U}));  // What the ECU now holds.
+}
+
+TEST_CASE(worker_uds_write_needs_a_backup) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const auto worker = std::make_unique<Worker>();
+    REQUIRE(connect_worker(*worker, fake));
+
+    // DID 1234 cannot be read, so there would be nothing to restore: nothing is written.
+    REQUIRE(post_and_wait(*worker, uds_write(0x1234U, {0x01U}), 2U));
+    const std::vector<UdsResult> results{uds_results_of(*worker)};
+    REQUIRE(results.size() == 1U);
+    CHECK(test::string_of(results[0U].label.text()) == "current value");
+    CHECK(results[0U].outcome == UdsResult::Outcome::kNegative);
+    CHECK(worker->state().message.view() ==
+          "Cannot read the current value to back it up, so nothing was written.");
+    CHECK(worker->state().message_failed);
+    worker->stop();
+    CHECK(!received(fake, "2E"));
+}
+
+TEST_CASE(worker_uds_read_only) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const auto worker = std::make_unique<Worker>();
+    REQUIRE(connect_worker(*worker, fake, true));
+
+    // Writes are refused before anything is sent (the write without its backup read); reads go.
+    REQUIRE(post_and_wait(*worker, uds_write(0x0407U, {0x01U}), 1U));
+    REQUIRE(post_and_wait(*worker, uds_request("session", "1003"), 1U));
+    REQUIRE(post_and_wait(*worker, uds_request("read", "22F190"), 1U));
+    const std::vector<UdsResult> results{uds_results_of(*worker)};
+    REQUIRE(results.size() == 3U);
+    CHECK(test::string_of(results[0U].label.text()) == "write");
+    CHECK(results[0U].outcome == UdsResult::Outcome::kRefused);
+    CHECK(test::string_of(results[0U].reason.text()) == "refused in read-only mode");
+    CHECK(results[1U].outcome == UdsResult::Outcome::kRefused);
+    CHECK(results[2U].outcome == UdsResult::Outcome::kPositive);
+    worker->stop();
+    CHECK(!received(fake, "2E"));
+    CHECK(!received(fake, "10"));
+}
+
+TEST_CASE(worker_raw_reports_adapter_errors) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const auto worker = std::make_unique<Worker>();
+    REQUIRE(connect_worker(*worker, fake));
+
+    // The addressing of expert mode is accepted silently; a command the adapter does not know is
+    // reported. The first message after both is about the second, so the first told nothing.
+    REQUIRE(worker->post(raw_request("ATSH7E0")));
+    REQUIRE(post_and_wait(*worker, raw_request("ATXYZ"), 1U));
+    CHECK(worker->state().message_failed);
+    CHECK(worker->state().message.view() == "ATXYZ: ?");
+    CHECK(has_line(trace_of(*worker), "ATSH7E0"));
 }

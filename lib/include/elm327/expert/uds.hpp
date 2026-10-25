@@ -27,7 +27,10 @@
 
 #include "common/containers/span.hpp"
 #include "common/containers/static_string.hpp"
+#include "common/containers/static_vector.hpp"
 #include "common/core/status.hpp"
+#include "elm327/adapter/response.hpp"
+#include "elm327/obd/message.hpp"
 
 namespace elm327 {
 namespace expert {
@@ -97,13 +100,16 @@ using UdsCommand = common::StaticString<kMaxCommandText>;
 
 /// Builds the request "<service><payload>" in hexadecimal into @p out (cleared first).
 /// @return true; false (and @p out empty) if it would exceed kMaxCommandText.
-[[nodiscard]] bool uds_request(std::uint8_t service, common::Span<const std::uint8_t> payload, UdsCommand& out) noexcept;
+[[nodiscard]] bool uds_request(std::uint8_t service, common::Span<const std::uint8_t> payload,
+                               UdsCommand& out) noexcept;
 
 /// DiagnosticSessionControl: "10 <session>".
 [[nodiscard]] bool uds_session_control(DiagnosticSession session, UdsCommand& out) noexcept;
 
-/// TesterPresent with the suppress-positive-response bit: "3E80". A pure keep-alive.
-[[nodiscard]] bool uds_tester_present(UdsCommand& out) noexcept;
+/// TesterPresent: "3E00", or "3E80" with @p suppress_response, the suppress-positive-response bit,
+/// for a background keep-alive that the ECU does not answer. A pure keep-alive either way; ask for
+/// the answer (false) to check that the ECU is there.
+[[nodiscard]] bool uds_tester_present(bool suppress_response, UdsCommand& out) noexcept;
 
 /// EcuReset: "11 <type>".
 [[nodiscard]] bool uds_ecu_reset(EcuReset type, UdsCommand& out) noexcept;
@@ -144,6 +150,38 @@ struct UdsReply final {
 /// {0x7F,0x22,0x31}).
 /// @return the reply; kInvalidArgument for an empty message or a malformed negative reply.
 [[nodiscard]] common::Result<UdsReply> parse_uds_reply(common::Span<const std::uint8_t> message) noexcept;
+
+/// Most reply data bytes a UdsExchange keeps; a longer reply is cut and marked truncated.
+inline constexpr std::size_t kMaxReplyData{128U};
+
+/// The decoded reply to one UDS request. Unlike UdsReply, which views the message, it owns its
+/// bytes, so it stays valid after the next request (like PidReading).
+struct UdsExchange final {
+    bool positive{false};     ///< See UdsReply.
+    std::uint8_t service{0U}; ///< The request service the reply echoes.
+    std::uint8_t nrc{0U};     ///< The negative response code when !positive.
+    bool pending{false};      ///< NRC 0x78: the ECU is still working on it.
+    /// The bytes after the service byte of a positive reply, e.g. the identifier and its value.
+    common::StaticVector<std::uint8_t, kMaxReplyData> data{};
+    bool truncated{false};  ///< The reply had more data than kMaxReplyData; data holds the start.
+};
+
+/// Decodes @p response, the adapter's reply to a UDS request, into @p exchange: assembles the
+/// message in @p scratch (several CAN frames make one message) and interprets the first one with
+/// parse_uds_reply(). The caller checks the adapter's error messages first (is_error() of
+/// Response::reply()), since they carry no message.
+/// @return kOk; kNotFound when the reply holds no message (no data lines); otherwise the errors of
+///         parse_messages() and parse_uds_reply(), e.g. kInvalidArgument for a line that is not
+///         hexadecimal bytes (as with headers on) or a malformed negative reply.
+[[nodiscard]] common::Status decode_uds_response(const Response& response, MessageList& scratch,
+                                                 UdsExchange& exchange) noexcept;
+
+/// Writes @p bytes as text to the start of @p out when every byte is a printable ASCII character
+/// (0x20 to 0x7E), e.g. the VIN or a part number read with ReadDataByIdentifier. No NUL is written.
+/// @return the number of characters written; kInvalidArgument for no bytes or a byte that is not
+///         printable; kOutOfRange if @p out is too small.
+[[nodiscard]] common::Result<std::size_t> format_printable(common::Span<const std::uint8_t> bytes,
+                                                           common::Span<char> out) noexcept;
 
 /// @return a short name for the request service @p service, e.g. "ReadDataByIdentifier", or
 ///         "unknown service" for one this does not name.

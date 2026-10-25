@@ -26,7 +26,10 @@ used.
   `line_editor` turns keys into a line without touching the terminal.
 - `gui/`: `elm327gui`. `worker` (the `elm327gui_core` library, no ImGui) owns the `Controller` on a
   thread of its own and talks to the window through Common's queues; `app` draws the window with
-  ImGui; `main` sets up GLFW and OpenGL. The window never does serial I/O. Widget mode: `gauge`
+  ImGui; `main` sets up GLFW and OpenGL. The window never does serial I/O. The Expert tab posts UDS
+  requests (`RequestKind::kUds`, and `kUdsWrite`, which backs the value up first and writes nothing
+  without that backup) and gets a `UdsResult` for each through a queue of its own; every request it
+  can send that changes the vehicle goes through its confirmation dialog. Widget mode: `gauge`
   (also in `elm327gui_core`, no ImGui) holds the scale of every dial and plans the layout, so a new
   dial is a row in its table plus a test; `dashboard` draws them.
 - `sim/`: `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal, and the `elm327sim`

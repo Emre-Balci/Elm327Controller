@@ -361,3 +361,50 @@ TEST_CASE(cli_coding_catalog) {
     CHECK(bad.exit_code == elm327::cli::kExitUsage);
     CHECK(contains(bad.err, "unknown make"));
 }
+
+TEST_CASE(cli_uds_read_shows_printable_values) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome outcome{run_cli({"-d", fake.device_path(), "uds", "read", "F190"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(outcome.out,
+                   "read: ReadDataByIdentifier ok\n"
+                   "  data  F1 90 31 44 34 47 50 30 30 52 35 35 42 31 32 33 34 35 36\n"
+                   "  text  \"1D4GP00R55B123456\"\n"));
+
+    // A value that is not text shows no text line.
+    const Outcome coding{run_cli({"-d", fake.device_path(), "uds", "read", "0407"})};
+    CHECK(coding.exit_code == elm327::cli::kExitSuccess);
+    CHECK(!contains(coding.out, "text"));
+}
+
+TEST_CASE(cli_uds_write_needs_a_backup) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    // DID 1234 cannot be read, so there would be nothing to restore: nothing is written.
+    const Outcome outcome{run_cli({"-d", fake.device_path(), "-y", "uds", "write", "1234", "01"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(outcome.err, "current value: negative response, requestOutOfRange (0x31)"));
+    CHECK(contains(outcome.err, "cannot read the current value to back it up, so nothing was written"));
+    for (const std::string& command : fake.commands()) {
+        CHECK(command.substr(0U, 2U) != "2E");
+    }
+}
+
+TEST_CASE(cli_uds_tester_and_addressing) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome tester{run_cli({"-d", fake.device_path(), "uds", "tester"})};
+    CHECK(tester.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(tester.out, "tester present: TesterPresent ok\n"));
+
+    // With the suppress-positive-response bit the ECU stays silent, and the adapter says NO DATA.
+    const Outcome silent{run_cli({"-d", fake.device_path(), "uds", "send", "3E", "80"})};
+    CHECK(silent.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(silent.err, "uds: NO DATA"));
+
+    // The CAN addressing of expert mode: header, receive filter, and the filter reset.
+    const Outcome addressing{run_cli({"-d", fake.device_path(), "raw", "ATSH7E0", "ATCRA7E8", "ATCRA"})};
+    CHECK(addressing.exit_code == elm327::cli::kExitSuccess);
+    CHECK(addressing.out == "> ATSH7E0\nOK\n> ATCRA7E8\nOK\n> ATCRA\nOK\n");
+}

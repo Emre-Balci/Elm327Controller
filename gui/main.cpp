@@ -64,7 +64,7 @@ constexpr std::array<std::string_view, 23U> kUsage{{
     "  -i, --interval MS     time between the samples of the monitor (default 1000)",
     "  -w, --widgets         widget mode: the live data as the gauges of a dashboard",
     "  -r, --read-only       safe mode: refuse anything that could change the vehicle",
-    "      --tab NAME        open the tab live, codes, vehicle or terminal",
+    "      --tab NAME        open the tab live, codes, vehicle, terminal or expert",
     "      --screenshot FILE save the window as a PPM image once it is idle, then exit",
     "  -h, --help            show this help",
     "      --version         show the version",
@@ -163,6 +163,8 @@ bool parse_tab(const std::string_view text, Tab& tab) noexcept {
         tab = Tab::kVehicle;
     } else if (text == "terminal") {
         tab = Tab::kTerminal;
+    } else if (text == "expert") {
+        tab = Tab::kExpert;
     } else {
         valid = false;
     }
@@ -223,7 +225,7 @@ bool apply_option(const std::string_view name, const char* const value, Argument
     } else if (name == "--tab") {
         valid = parse_tab(text, start.tab);
         if (!valid) {
-            print_error("unknown tab (live, codes, vehicle or terminal)", text);
+            print_error("unknown tab (live, codes, vehicle, terminal or expert)", text);
         }
     } else if (name == "--screenshot") {
         arguments.screenshot = value;

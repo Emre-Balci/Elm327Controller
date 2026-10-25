@@ -520,8 +520,8 @@ common::Result<UdsBytes> collect_hex_bytes(const Options& options, const std::si
     common::Status status{common::Status::kOk};
     for (std::size_t index{from}; is_ok(status) && (index < options.arguments.size()); ++index) {
         std::array<std::uint8_t, expert::kMaxRequestData> buffer{};
-        const common::Result<std::size_t> count{
-            common::decode_hex_bytes(options.arguments[index], common::Span<std::uint8_t>{buffer.data(), buffer.size()})};
+        const common::Span<std::uint8_t> out{buffer.data(), buffer.size()};
+        const common::Result<std::size_t> count{common::decode_hex_bytes(options.arguments[index], out)};
         if (!count.has_value()) {
             status = count.status();
         }
@@ -591,29 +591,45 @@ std::int32_t Session::send_uds(const std::string_view label, const std::string_v
         return kExitFailure;
     }
     MessageList messages{};
-    if ((!is_ok(parse_messages(response_, messages))) || messages.empty()) {
-        // Not a message this can assemble (e.g. an "OK" to an AT command): show the raw lines.
+    expert::UdsExchange exchange{};
+    const common::Status decoded{expert::decode_uds_response(response_, messages, exchange)};
+    if (decoded == common::Status::kNotFound) {
+        err_->print(Line{}.text(kProgram).text(": ").text(label).text(": no reply to decode"));
+        return kExitFailure;
+    }
+    if (!is_ok(decoded)) {
+        // Show what came back, e.g. lines with headers on (ATH1), which are not decoded.
         for (std::size_t row{0U}; row < response_.size(); ++row) {
             out_->print(Line{}.text(response_.line(row)));
         }
-        return kExitSuccess;
+        return fail(label, decoded, response_);
     }
-    const common::Result<expert::UdsReply> reply{expert::parse_uds_reply(messages[0U].bytes())};
-    if (!reply.has_value()) {
-        return fail(label, reply.status(), response_);
-    }
+    const common::Span<const std::uint8_t> data{exchange.data.data(), exchange.data.size()};
     std::int32_t exit_code{kExitSuccess};
-    if (reply.value().positive) {
+    if (exchange.positive) {
         Line line{};
-        line.text(label).text(": ").text(std::string_view{expert::uds_service_name(reply.value().service)}).text(" ok");
+        line.text(label).text(": ").text(std::string_view{expert::uds_service_name(exchange.service)}).text(" ok");
         out_->print(line);
-        if (!reply.value().data.empty()) {
-            out_->print(Line{}.text("  data  ").hex_bytes(reply.value().data));
+        if (!data.empty()) {
+            out_->print(Line{}.text("  data  ").hex_bytes(data));
+        }
+        // The value of a data identifier, after its two-byte echo, as text when it is printable (a
+        // VIN, a part number).
+        if ((exchange.service == expert::service_id(expert::UdsService::kReadDataByIdentifier)) && (data.size() > 2U)) {
+            std::array<char, expert::kMaxReplyData> text{};
+            const common::Result<std::size_t> length{expert::format_printable(data.subspan(2U), text)};
+            if (length.has_value()) {
+                const common::Span<const char> printable{text.data(), length.value()};
+                out_->print(Line{}.text("  text  \"").text(printable).character('"'));
+            }
+        }
+        if (exchange.truncated) {
+            out_->print("  (the reply is longer; only its start is shown)");
         }
     } else {
         Line line{};
         line.text(kProgram).text(": ").text(label).text(": negative response, ");
-        line.text(std::string_view{expert::nrc_name(reply.value().nrc)}).text(" (0x").hex(reply.value().nrc, 2U);
+        line.text(std::string_view{expert::nrc_name(exchange.nrc)}).text(" (0x").hex(exchange.nrc, 2U);
         line.character(')');
         err_->print(line);
         exit_code = kExitFailure;
@@ -640,7 +656,7 @@ std::int32_t Session::run_uds() noexcept {
         }
     }
     if (common::equals(sub, "tester")) {
-        static_cast<void>(expert::uds_tester_present(command));
+        static_cast<void>(expert::uds_tester_present(false, command));  // Ask for the answer.
         exit_code = send_uds("tester present", command.view());
     } else if (common::equals(sub, "read")) {
         const common::Result<std::uint16_t> did{(count == 2U) ? parse_u16(options_->arguments[1U])
@@ -708,24 +724,25 @@ std::int32_t Session::run_uds_write() noexcept {
     }
     const UdsBytes bytes{value.value()};
     const common::Span<const std::uint8_t> value_span{bytes.data(), bytes.size()};
-    // Back up: show the current value before the write (skipped when read-only will refuse the write).
-    if (!controller_.read_only()) {
-        expert::UdsCommand read_command{};
-        if (expert::uds_read_data_by_identifier(did.value(), read_command)) {
-            static_cast<void>(send_uds("current value", read_command.view()));
-        }
-    }
-    expert::UdsCommand command{};
-    if (!expert::uds_write_data_by_identifier(did.value(), value_span, command)) {
+    expert::UdsCommand write_command{};
+    expert::UdsCommand read_command{};
+    static_cast<void>(expert::uds_read_data_by_identifier(did.value(), read_command));  // Cannot fail: fixed size.
+    if (!expert::uds_write_data_by_identifier(did.value(), value_span, write_command)) {
         err_->print(Line{}.text(kProgram).text(": the value is too long for one request"));
         return kExitUsage;
     }
-    const std::int32_t exit_code{send_uds("write", command.view())};
-    if ((exit_code == kExitSuccess) && (!controller_.read_only())) {
-        expert::UdsCommand read_command{};
-        if (expert::uds_read_data_by_identifier(did.value(), read_command)) {
-            static_cast<void>(send_uds("new value", read_command.view()));
+    // Back up first: without the current value there is nothing to restore, so nothing is written.
+    // Read-only mode refuses the write anyway, so it skips the backup.
+    if (!controller_.read_only()) {
+        if (send_uds("current value", read_command.view()) != kExitSuccess) {
+            err_->print(Line{}.text(kProgram).text(
+                ": cannot read the current value to back it up, so nothing was written"));
+            return kExitFailure;
         }
+    }
+    const std::int32_t exit_code{send_uds("write", write_command.view())};
+    if ((exit_code == kExitSuccess) && (!controller_.read_only())) {
+        static_cast<void>(send_uds("new value", read_command.view()));  // Confirms what the ECU now holds.
     }
     return exit_code;
 }
@@ -790,9 +807,10 @@ std::int32_t Session::run_uds_routine() noexcept {
 }
 
 std::int32_t Session::run_uds_key() noexcept {
-    const common::Result<std::uint8_t> level{(options_->arguments.size() >= 3U) ? parse_pid(options_->arguments[1U])
-                                                                                : common::Result<std::uint8_t>::failure(
-                                                                                      common::Status::kInvalidArgument)};
+    common::Result<std::uint8_t> level{common::Result<std::uint8_t>::failure(common::Status::kInvalidArgument)};
+    if (options_->arguments.size() >= 3U) {
+        level = parse_pid(options_->arguments[1U]);
+    }
     const common::Result<UdsBytes> key{collect_hex_bytes(*options_, 2U)};
     std::int32_t exit_code{kExitUsage};
     if ((!level.has_value()) || (!key.has_value())) {

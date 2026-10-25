@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <string_view>
 
 #include "common/containers/span.hpp"
 #include "common/protocol/text.hpp"
@@ -15,6 +16,14 @@ constexpr std::uint8_t kNegativeResponse{0x7FU};
 constexpr std::uint8_t kPositiveOffset{0x40U};
 constexpr std::uint8_t kResponsePending{0x78U};
 constexpr std::size_t kNegativeReplyLength{3U};  ///< "7F <service> <nrc>".
+
+/// The printable ASCII characters 0x20 to 0x7E, indexed by the byte minus kFirstPrintable: bytes
+/// become characters through this table, never by a cast.
+constexpr std::uint8_t kFirstPrintable{0x20U};
+constexpr std::uint8_t kLastPrintable{0x7EU};
+constexpr std::string_view kPrintable{
+    " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"};
+static_assert(kPrintable.size() == ((kLastPrintable - kFirstPrintable) + 1U), "one character per printable byte");
 
 /// Clears @p out on failure so a false return always leaves it empty.
 bool finish(const bool ok, UdsCommand& out) noexcept {
@@ -39,9 +48,9 @@ bool uds_session_control(const DiagnosticSession session, UdsCommand& out) noexc
     return uds_request(service_id(UdsService::kDiagnosticSessionControl), payload, out);
 }
 
-bool uds_tester_present(UdsCommand& out) noexcept {
-    // Subfunction 0x00 with the suppress-positive-response bit (0x80): the ECU stays silent.
-    const std::array<std::uint8_t, 1U> payload{{0x80U}};
+bool uds_tester_present(const bool suppress_response, UdsCommand& out) noexcept {
+    // Subfunction 0x00; the suppress-positive-response bit (0x80) makes the ECU stay silent.
+    const std::array<std::uint8_t, 1U> payload{{suppress_response ? std::uint8_t{0x80U} : std::uint8_t{0x00U}}};
     return uds_request(service_id(UdsService::kTesterPresent), payload, out);
 }
 
@@ -105,13 +114,58 @@ common::Result<UdsReply> parse_uds_reply(const common::Span<const std::uint8_t> 
             // A "7F" with fewer than three bytes stays kInvalidArgument.
         } else {
             reply.positive = true;
-            reply.service =
-                (message[0U] >= kPositiveOffset) ? static_cast<std::uint8_t>(message[0U] - kPositiveOffset) : message[0U];
+            const std::uint8_t first{message[0U]};
+            reply.service = (first >= kPositiveOffset) ? static_cast<std::uint8_t>(first - kPositiveOffset) : first;
             reply.data = message.subspan(1U);
             result = ReplyResult::success(reply);
         }
     }
     return result;
+}
+
+common::Status decode_uds_response(const Response& response, MessageList& scratch, UdsExchange& exchange) noexcept {
+    exchange = UdsExchange{};
+    common::Status status{parse_messages(response, scratch)};
+    if (is_ok(status) && scratch.empty()) {
+        status = common::Status::kNotFound;  // No data lines, e.g. only "OK" or "SEARCHING...".
+    }
+    if (is_ok(status)) {
+        const common::Result<UdsReply> reply{parse_uds_reply(scratch[0U].bytes())};
+        status = reply.status();
+        if (reply.has_value()) {
+            const UdsReply& decoded{reply.value()};
+            exchange.positive = decoded.positive;
+            exchange.service = decoded.service;
+            exchange.nrc = decoded.nrc;
+            exchange.pending = decoded.pending;
+            for (const std::uint8_t byte : decoded.data) {
+                if (!exchange.data.push_back(byte)) {
+                    exchange.truncated = true;
+                }
+            }
+        }
+    }
+    return status;
+}
+
+common::Result<std::size_t> format_printable(const common::Span<const std::uint8_t> bytes,
+                                             const common::Span<char> out) noexcept {
+    using SizeResult = common::Result<std::size_t>;
+    common::Status status{bytes.empty() ? common::Status::kInvalidArgument : common::Status::kOk};
+    for (std::size_t index{0U}; is_ok(status) && (index < bytes.size()); ++index) {
+        if ((bytes[index] < kFirstPrintable) || (bytes[index] > kLastPrintable)) {
+            status = common::Status::kInvalidArgument;
+        }
+    }
+    if (is_ok(status) && (bytes.size() > out.size())) {
+        status = common::Status::kOutOfRange;
+    }
+    if (is_ok(status)) {
+        for (std::size_t index{0U}; index < bytes.size(); ++index) {
+            out[index] = kPrintable[static_cast<std::size_t>(bytes[index]) - std::size_t{kFirstPrintable}];
+        }
+    }
+    return is_ok(status) ? SizeResult::success(bytes.size()) : SizeResult::failure(status);
 }
 
 const char* uds_service_name(const std::uint8_t service) noexcept {

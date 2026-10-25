@@ -106,7 +106,15 @@ std::string protocol_name(const char protocol) {
 bool is_accepted_setting(const std::string& name) {
     static const std::set<std::string> kSettings{"D", "H0", "H1", "M0", "M1", "AT0", "AT1", "AT2", "CAF0", "CAF1"};
     const bool timeout{(name.size() == 4U) && (name.compare(0U, 2U, "ST") == 0)};  // ATST hh.
-    return timeout || (kSettings.count(name) > 0U);
+    // The CAN addressing of expert mode: the header (ATSH), the receive filter (ATCRA, or ATCRA
+    // alone to reset it) and the flow control (ATFCSH, ATFCSD, ATFCSM). The simulated ECU answers
+    // whatever address is set.
+    const std::array<std::string_view, 5U> kAddressing{{"SH", "CRA", "FCSH", "FCSD", "FCSM"}};
+    bool addressing{false};
+    for (const std::string_view prefix : kAddressing) {
+        addressing = addressing || (name.compare(0U, prefix.size(), prefix) == 0);
+    }
+    return timeout || addressing || (kSettings.count(name) > 0U);
 }
 
 }  // namespace
@@ -388,16 +396,20 @@ std::vector<std::vector<std::uint8_t>> FakeElm327::uds_messages(const std::vecto
     const std::uint8_t service{request[0U]};
     const std::uint8_t positive{static_cast<std::uint8_t>(service + 0x40U)};
     if (service == 0x3EU) {
-        // TesterPresent: a positive reply (the simulator ignores the suppress-positive bit).
-        const std::uint8_t sub{(request.size() >= 2U) ? static_cast<std::uint8_t>(request[1U] & 0x7FU) : std::uint8_t{0U}};
-        messages.push_back({positive, sub});
+        // TesterPresent: a positive reply, unless the suppress-positive-response bit asks for none
+        // (the adapter then reports "NO DATA", as with a real ECU).
+        const std::uint8_t sub{(request.size() >= 2U) ? request[1U] : std::uint8_t{0U}};
+        if ((sub & 0x80U) == 0U) {
+            messages.push_back({positive, sub});
+        }
     } else if ((service == 0x10U) && (request.size() == 2U)) {
         // DiagnosticSessionControl: echo the session and some timing parameters.
         messages.push_back({positive, request[1U], 0x00U, 0x32U, 0x01U, 0xF4U});
     } else if ((service == 0x11U) && (request.size() == 2U)) {
         messages.push_back({positive, request[1U]});  // ECUReset.
     } else if ((service == 0x22U) && (request.size() == 3U)) {
-        const std::uint16_t did{static_cast<std::uint16_t>((static_cast<std::uint16_t>(request[1U]) << 8U) | request[2U])};
+        const std::uint16_t did{
+            static_cast<std::uint16_t>((static_cast<std::uint16_t>(request[1U]) << 8U) | request[2U])};
         const auto entry = vehicle_.data_by_identifier.find(did);
         if (entry != vehicle_.data_by_identifier.end()) {
             std::vector<std::uint8_t> message{positive, request[1U], request[2U]};
@@ -408,7 +420,8 @@ std::vector<std::vector<std::uint8_t>> FakeElm327::uds_messages(const std::vecto
         }
     } else if ((service == 0x2EU) && (request.size() >= 3U)) {
         // WriteDataByIdentifier: store the new value so a later read shows it changed.
-        const std::uint16_t did{static_cast<std::uint16_t>((static_cast<std::uint16_t>(request[1U]) << 8U) | request[2U])};
+        const std::uint16_t did{
+            static_cast<std::uint16_t>((static_cast<std::uint16_t>(request[1U]) << 8U) | request[2U])};
         vehicle_.data_by_identifier[did] = std::vector<std::uint8_t>{request.begin() + 3, request.end()};
         messages.push_back({positive, request[1U], request[2U]});
     } else if ((service == 0x31U) && (request.size() >= 4U)) {

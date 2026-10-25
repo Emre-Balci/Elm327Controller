@@ -8,7 +8,9 @@
 /// - the State, a snapshot of everything the worker knows (the connection, the adapter, the
 ///   supported PIDs, the trouble codes, the VIN, what it is busy with), through a TripleBuffer;
 /// - Samples of PID values, through an SpscQueue, so that no value of a monitor is lost;
-/// - TraceLines, the traffic with the adapter and the worker's messages, through another SpscQueue.
+/// - TraceLines, the traffic with the adapter and the worker's messages, through another SpscQueue;
+/// - UdsResults, the outcome of each UDS request of expert mode, through a third one, so that the
+///   three steps of a write (read, write, read again) all arrive.
 ///
 /// cancel() interrupts the operation in progress and drops the requests posted before it, like
 /// Ctrl+C in the shell.
@@ -38,7 +40,9 @@
 #include "elm327/adapter/adapter.hpp"
 #include "elm327/adapter/response.hpp"
 #include "elm327/controller/controller.hpp"
+#include "elm327/expert/uds.hpp"
 #include "elm327/obd/dtc.hpp"
+#include "elm327/obd/message.hpp"
 #include "elm327/obd/vin.hpp"
 
 namespace elm327 {
@@ -62,8 +66,13 @@ enum class RequestKind : std::uint8_t {
     kReadDtcs,      ///< Read the MIL status and the stored, pending and permanent DTCs.
     kReadVin,
     kRaw,           ///< Send Request::command to the adapter as it is.
+    kUds,           ///< Send the UDS request Request::command and report a UdsResult (expert mode).
+    kUdsWrite,      ///< Write Request::value to Request::did with a backup: read, write, read again.
     kStop,          ///< End the thread.
 };
+
+/// A short name of what a UDS request is for, shown with its result, e.g. "read" or "current value".
+using UdsLabel = common::StaticString<24U>;
 
 struct Request final {
     RequestKind kind{RequestKind::kStop};
@@ -72,7 +81,13 @@ struct Request final {
     bool read_only{false};
     common::ByteSet pids{};
     common::Duration interval{kDefaultInterval};
+    /// kRaw: the command; kUds: the request in hexadecimal, e.g. "22F190".
     common::StaticString<Adapter::kMaxCommandLength> command{};
+    /// kUds: what the request is for.
+    UdsLabel label{};
+    /// kUdsWrite: the data identifier and the value to write.
+    std::uint16_t did{0U};
+    common::StaticVector<std::uint8_t, expert::kMaxRequestData> value{};
     std::uint32_t generation{0U};  ///< Set by Worker::post(); see Worker::cancel().
 };
 
@@ -87,6 +102,7 @@ enum class Activity : std::uint8_t {
     kReadingDtcs,
     kReadingVin,
     kSendingCommand,
+    kTalkingToEcu,  ///< A UDS request of expert mode.
 };
 
 /// @return a description of @p activity for the user, e.g. "Reading trouble codes".
@@ -158,6 +174,24 @@ struct TraceLine final {
     MessageText text{};
 };
 
+/// The outcome of one UDS request of expert mode.
+struct UdsResult final {
+    enum class Outcome : std::uint8_t {
+        kPositive,  ///< The ECU accepted the request; exchange holds its reply.
+        kNegative,  ///< The ECU rejected it; exchange.nrc says why.
+        kRefused,   ///< Read-only mode refused it before anything was sent.
+        kFailed,    ///< No usable reply, e.g. "NO DATA", a timeout, or a reply that is not UDS.
+    };
+
+    Outcome outcome{Outcome::kFailed};
+    UdsLabel label{};
+    /// The request as sent, in hexadecimal, e.g. "22F190".
+    common::StaticString<Adapter::kMaxCommandLength> request{};
+    expert::UdsExchange exchange{};
+    /// Why the outcome is not kPositive, in words, e.g. "securityAccessDenied (0x33)" or "NO DATA".
+    MessageText reason{};
+};
+
 /// Called on the worker's thread after it published something, e.g. to wake up the user
 /// interface (glfwPostEmptyEvent()). Must not block.
 using NotifyFunction = void (*)(void* context) noexcept;
@@ -167,6 +201,7 @@ public:
     static constexpr std::size_t kRequestCapacity{16U};
     static constexpr std::size_t kSampleCapacity{64U};
     static constexpr std::size_t kTraceCapacity{512U};
+    static constexpr std::size_t kUdsCapacity{64U};
 
     Worker() noexcept = default;
 
@@ -219,6 +254,11 @@ public:
         return trace_.try_pop(line);
     }
 
+    /// @return true with the oldest UdsResult not taken yet in @p result.
+    [[nodiscard]] bool take_uds_result(UdsResult& result) noexcept {
+        return uds_results_.try_pop(result);
+    }
+
     /// Samples and trace lines dropped because the user interface did not take them in time.
     [[nodiscard]] std::uint64_t dropped() const noexcept {
         return dropped_.load(std::memory_order_relaxed);
@@ -243,6 +283,11 @@ private:
     void read_dtcs() noexcept;
     void read_vin() noexcept;
     void send(const Request& request) noexcept;
+    void uds(const Request& request) noexcept;
+    void uds_write(const Request& request) noexcept;
+    /// Sends the UDS request @p command, decodes the reply, and publishes a UdsResult labelled
+    /// @p label, with a message for the status line. @return its outcome.
+    UdsResult::Outcome exchange_uds(std::string_view label, std::string_view command) noexcept;
 
     /// Queries @p command into @p text; "unknown" if the adapter does not know the command.
     common::Status query(std::string_view command, AdapterText& text) noexcept;
@@ -269,6 +314,7 @@ private:
     common::TripleBuffer<State> state_buffer_{};
     common::SpscQueue<Sample, kSampleCapacity> samples_{};
     common::SpscQueue<TraceLine, kTraceCapacity> trace_{};
+    common::SpscQueue<UdsResult, kUdsCapacity> uds_results_{};
     std::atomic<std::uint32_t> generation_{0U};
     std::atomic<std::uint64_t> dropped_{0U};
     std::int32_t wake_descriptor_{-1};    ///< eventfd: a request was posted.
@@ -280,7 +326,8 @@ private:
 
     // The worker's thread only.
     Controller controller_{};
-    Response response_{};  ///< Replies to raw commands.
+    Response response_{};         ///< Replies to raw commands and UDS requests.
+    MessageList uds_messages_{};  ///< Scratch for decoding UDS replies.
     State state_{};
     bool stopping_{false};
     std::uint32_t monitor_generation_{0U};

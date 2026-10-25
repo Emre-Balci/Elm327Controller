@@ -2,14 +2,17 @@
 /// @brief The window of elm327gui: what it shows of the Worker's results, and what a click asks the
 ///        Worker to do.
 ///
-/// The window has a connection bar (device, baud rate, protocol, Connect), four tabs and a status
-/// line:
+/// The window has a connection bar (device, baud rate, protocol, Read-only, Connect), five tabs and
+/// a status line:
 /// - Live data: the supported PIDs with their latest values; selected PIDs are monitored and
 ///   plotted. In widget mode the selected PIDs are the gauges of a classic car dashboard instead
 ///   (see Dashboard);
 /// - Trouble codes: the MIL status and the stored, pending and permanent DTCs;
 /// - Vehicle: the VIN and what the adapter tells about itself;
-/// - Terminal: the traffic with the adapter, and a line to send AT commands or OBD requests.
+/// - Terminal: the traffic with the adapter, and a line to send AT commands or OBD requests;
+/// - Expert: UDS/KWP requests to an ECU (target, session, data identifiers, routines, security
+///   access, reset, any request), their results, and the coding reference. Every request that can
+///   change the vehicle is confirmed first and disabled in read-only mode.
 ///
 /// App only runs on the thread that draws: it never touches the serial port, so the window stays
 /// responsive while the adapter takes its time.
@@ -37,6 +40,7 @@ enum class Tab : std::uint8_t {
     kTroubleCodes,
     kVehicle,
     kTerminal,
+    kExpert,
 };
 
 /// @return the position of @p baud_rate in the baud-rate list of the connection bar; kNotFound for a
@@ -64,6 +68,10 @@ public:
     static constexpr std::size_t kHistorySize{240U};
     /// Lines kept in the terminal.
     static constexpr std::size_t kLogSize{1000U};
+    /// Results kept in the expert tab.
+    static constexpr std::size_t kUdsLogSize{100U};
+    /// An input field for hexadecimal bytes separated by spaces: the most a request carries.
+    static constexpr std::size_t kBytesFieldSize{(3U * expert::kMaxRequestData) + 1U};
 
     explicit App(Worker& worker) noexcept;
 
@@ -102,7 +110,29 @@ private:
     void draw_trouble_codes() noexcept;
     void draw_vehicle() noexcept;
     void draw_terminal() noexcept;
+    void draw_expert() noexcept;
+    /// The requests of expert mode, left of their results.
+    void draw_expert_controls(const State& state) noexcept;
+    void draw_expert_results() noexcept;
+    void draw_coding_reference() noexcept;
+    /// The confirmation of a request that can change the vehicle, while one waits for it.
+    void draw_confirmation() noexcept;
     void draw_status() noexcept;
+    void log_uds(const UdsResult& result) noexcept;
+
+    // The actions of expert mode. Each checks its fields, and says what is wrong in expert_error_.
+    void apply_target() noexcept;
+    void change_session() noexcept;
+    void tester_present() noexcept;
+    void read_did() noexcept;
+    void write_did() noexcept;
+    void run_routine() noexcept;
+    void request_seed() noexcept;
+    void send_key() noexcept;
+    void reset_ecu() noexcept;
+    void send_any() noexcept;
+    /// Posts @p request at once when it only reads; otherwise asks first, telling @p summary.
+    void submit(const Request& request, bool writes, common::Span<const char> summary) noexcept;
 
     void connect() noexcept;
     void start_monitor() noexcept;
@@ -161,6 +191,31 @@ private:
     std::size_t log_next_{0U};
     bool scroll_log_{false};
     std::array<char, Adapter::kMaxCommandLength + 1U> command_{};
+
+    // Expert mode: the fields, the results, and a request waiting for confirmation.
+    std::array<char, 9U> target_header_{};   ///< e.g. "7E0"; ATSH.
+    std::array<char, 9U> target_reply_{};    ///< e.g. "7E8"; ATCRA, empty for any.
+    std::int32_t session_index_{2};          ///< The extended session.
+    std::array<char, 5U> did_{};             ///< e.g. "F190".
+    std::array<char, kBytesFieldSize> value_{};
+    std::int32_t routine_type_index_{0};     ///< Start.
+    std::array<char, 5U> routine_{};
+    std::array<char, kBytesFieldSize> routine_data_{};
+    std::array<char, 3U> security_level_{};  ///< The seed level, odd; the key goes with the next one.
+    std::array<char, kBytesFieldSize> security_key_{};
+    std::int32_t reset_index_{2};            ///< A soft reset.
+    std::array<char, Adapter::kMaxCommandLength + 1U> any_request_{};
+    common::StaticString<192U> expert_error_{};
+    std::array<UdsResult, kUdsLogSize> uds_log_{};
+    std::size_t uds_log_count_{0U};
+    std::size_t uds_log_next_{0U};
+    bool scroll_uds_log_{false};
+    std::int32_t coding_make_index_{0};  ///< All makes.
+    bool coding_open_{false};            ///< The coding reference was open in the last frame.
+    Request pending_{};
+    common::StaticString<512U> pending_summary_{};
+    bool open_confirmation_{false};  ///< Open the confirmation in the next frame.
+    bool confirmed_{false};          ///< Its "I accept the risk" box.
 };
 
 }  // namespace gui
