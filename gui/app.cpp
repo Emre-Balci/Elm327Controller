@@ -13,6 +13,7 @@
 #include "elm327/adapter/adapter.hpp"
 #include "elm327/obd/dtc.hpp"
 #include "elm327/obd/pid.hpp"
+#include "gui/gauge.hpp"
 #include "imgui.h"
 
 namespace elm327 {
@@ -169,6 +170,7 @@ void App::start(const StartOptions& options) noexcept {
     interval_ms_ = (interval < kMinInterval) ? kMinInterval : ((interval > kMaxInterval) ? kMaxInterval : interval);
     tab_ = options.tab;
     select_tab_ = true;
+    widget_mode_ = options.widgets;
     pending_monitor_ = options.monitor;
     for (std::uint32_t value{1U}; value <= 0xFFU; ++value) {
         selected_[value] = options.monitor.contains(static_cast<std::uint8_t>(value));
@@ -180,7 +182,7 @@ void App::start(const StartOptions& options) noexcept {
 
 bool App::active() const noexcept {
     const State& state{worker_->state()};
-    return (state.activity != Activity::kIdle) || state.monitoring;
+    return (state.activity != Activity::kIdle) || state.monitoring || (widget_mode_ && dashboard_.moving());
 }
 
 void App::draw() noexcept {
@@ -229,13 +231,22 @@ void App::take_results() noexcept {
     static_cast<void>(worker_->update_state());
     const State& state{worker_->state()};
     if (!state.connected) {
-        // The next connection reads the codes and the VIN again when their tabs open.
+        // The next connection reads the codes and the VIN again when their tabs open, and widget
+        // mode starts its monitor again.
         dtcs_requested_ = false;
         vin_requested_ = false;
+        dashboard_started_ = false;
+    }
+    if (state.monitoring) {
+        dashboard_started_ = true;
     }
     if ((!pending_monitor_.empty()) && state.connected && state.pids_known) {
         start_monitor();
         pending_monitor_ = common::ByteSet{};
+        dashboard_started_ = true;
+    }
+    if (widget_mode_ && (!dashboard_started_) && state.connected && state.pids_known && (!is_busy(state))) {
+        start_dashboard();
     }
     // At most what the queues hold, so a frame never takes long.
     Sample sample{};
@@ -350,8 +361,11 @@ void App::draw_live() noexcept {
     const State& state{worker_->state()};
     const bool busy{is_busy(state)};
     if (!state.connected) {
+        // Widget mode can be chosen before connecting: it starts once the supported PIDs are known.
+        static_cast<void>(ImGui::Checkbox("Widget mode", &widget_mode_));
         show_disabled("Connect to the adapter to read live data.");
     } else if (!state.pids_known) {
+        static_cast<void>(ImGui::Checkbox("Widget mode", &widget_mode_));
         show("The PIDs the vehicle supports are not known yet.");
         ImGui::BeginDisabled(busy);
         if (ImGui::Button("Read supported PIDs")) {
@@ -359,6 +373,36 @@ void App::draw_live() noexcept {
         }
         ImGui::EndDisabled();
     } else {
+        draw_live_toolbar(state);
+        if (!widget_mode_) {
+            const float width{ImGui::GetContentRegionAvail().x};
+            if (ImGui::BeginChild("pid_list", ImVec2{width * 0.55F, 0.0F}, ImGuiChildFlags_ResizeX)) {
+                draw_pid_table(state);
+            }
+            ImGui::EndChild();
+            ImGui::SameLine();
+            if (ImGui::BeginChild("plots", ImVec2{0.0F, 0.0F})) {
+                draw_plots();
+            }
+            ImGui::EndChild();
+        } else if (selected_count() == 0U) {
+            show_disabled("The vehicle supports none of the gauges of the default dashboard: choose what to show.");
+        } else {
+            if (ImGui::BeginChild("dashboard", ImVec2{0.0F, 0.0F})) {
+                dashboard_.draw(selection(), latest_, has_latest_);
+            }
+            ImGui::EndChild();
+        }
+    }
+}
+
+void App::draw_live_toolbar(const State& state) noexcept {
+    const bool busy{is_busy(state)};
+    if (ImGui::Checkbox("Widget mode", &widget_mode_) && widget_mode_) {
+        start_dashboard();
+    }
+    ImGui::SameLine();
+    if (!widget_mode_) {
         ImGui::BeginDisabled(busy || state.monitoring);
         if (ImGui::Button("Read all values")) {
             Request request{};
@@ -368,41 +412,92 @@ void App::draw_live() noexcept {
         }
         ImGui::EndDisabled();
         ImGui::SameLine();
-        if (state.monitoring) {
-            if (ImGui::Button("Stop monitoring")) {
-                static_cast<void>(worker_->post(RequestKind::kStopMonitor));
-            }
-        } else {
-            ImGui::BeginDisabled(busy || (selected_count() == 0U));
-            if (ImGui::Button("Monitor selected")) {
-                start_monitor();
-            }
-            ImGui::EndDisabled();
+    }
+    if (state.monitoring) {
+        if (ImGui::Button("Stop monitoring")) {
+            static_cast<void>(worker_->post(RequestKind::kStopMonitor));
         }
-        ImGui::SameLine();
-        label("Interval");
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0F);
-        static_cast<void>(ImGui::SliderInt("##interval", &interval_ms_, kMinInterval, kMaxInterval, "%d ms",
-                                           ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp));
-        if (ImGui::IsItemDeactivatedAfterEdit() && state.monitoring) {
-            start_monitor();  // The new interval applies at once.
+    } else {
+        ImGui::BeginDisabled(busy || (selected_count() == 0U));
+        if (ImGui::Button(widget_mode_ ? "Start monitoring" : "Monitor selected")) {
+            start_monitor();
         }
-        ImGui::SameLine();
+        ImGui::EndDisabled();
+    }
+    ImGui::SameLine();
+    label("Interval");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0F);
+    static_cast<void>(ImGui::SliderInt("##interval", &interval_ms_, kMinInterval, kMaxInterval, "%d ms",
+                                       ImGuiSliderFlags_Logarithmic | ImGuiSliderFlags_AlwaysClamp));
+    if (ImGui::IsItemDeactivatedAfterEdit() && state.monitoring) {
+        start_monitor();  // The new interval applies at once.
+    }
+    ImGui::SameLine();
+    if (widget_mode_) {
+        draw_shown_choice(state);
+    } else {
         Text count{};
         static_cast<void>(common::append_unsigned(count, selected_count()) && count.append(" of ") &&
                           common::append_unsigned(count, kMaxMonitored) && count.append(" selected"));
         show_disabled(count.view());
+    }
+}
 
-        const float width{ImGui::GetContentRegionAvail().x};
-        if (ImGui::BeginChild("pid_list", ImVec2{width * 0.55F, 0.0F}, ImGuiChildFlags_ResizeX)) {
-            draw_pid_table(state);
+void App::draw_shown_choice(const State& state) noexcept {
+    Text preview{};
+    static_cast<void>(common::append_unsigned(preview, selected_count()) && preview.append(" of ") &&
+                      common::append_unsigned(preview, kMaxMonitored) && preview.append(" shown"));
+    label("Show");
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0F);
+    if (ImGui::BeginCombo("##shown", preview.c_str(), ImGuiComboFlags_HeightLargest)) {
+        const bool full{selected_count() >= kMaxMonitored};
+        ImGui::SeparatorText("Gauges");
+        for (const GaugeSpec& spec : gauges()) {
+            if (state.supported_pids.contains(spec.pid)) {
+                const common::Result<PidInfo> info{find_pid(spec.pid)};
+                Text text{};
+                static_cast<void>(text.append(spec.title) && text.append("  (") &&
+                                  text.append(info.has_value() ? info.value().name : std::string_view{}) &&
+                                  text.append(")"));
+                bool selected{selected_[spec.pid]};
+                ImGui::PushID(static_cast<int>(spec.pid));
+                ImGui::BeginDisabled(full && (!selected));
+                if (ImGui::Checkbox(text.c_str(), &selected)) {
+                    select(spec.pid, selected);
+                }
+                ImGui::EndDisabled();
+                ImGui::PopID();
+            }
         }
-        ImGui::EndChild();
-        ImGui::SameLine();
-        if (ImGui::BeginChild("plots", ImVec2{0.0F, 0.0F})) {
-            draw_plots();
+        ImGui::SeparatorText("Digital displays");
+        for (std::uint32_t value{1U}; value <= 0xFFU; ++value) {
+            const std::uint8_t pid{static_cast<std::uint8_t>(value)};
+            if (state.supported_pids.contains(pid) && (!is_support_pid(pid)) && (find_gauge(pid) == nullptr)) {
+                const common::Result<PidInfo> info{find_pid(pid)};
+                Text text{hex_text(pid, 2U)};
+                static_cast<void>(text.append("  ") &&
+                                  text.append(info.has_value() ? info.value().name : std::string_view{"(unknown PID)"}));
+                bool selected{selected_[value]};
+                ImGui::PushID(static_cast<int>(value));
+                ImGui::BeginDisabled(full && (!selected));
+                if (ImGui::Checkbox(text.c_str(), &selected)) {
+                    select(pid, selected);
+                }
+                ImGui::EndDisabled();
+                ImGui::PopID();
+            }
         }
-        ImGui::EndChild();
+        ImGui::Separator();
+        if (ImGui::Button("Default dashboard")) {
+            const common::ByteSet defaults{default_selection(state.supported_pids, kMaxMonitored)};
+            for (std::uint32_t value{1U}; value <= 0xFFU; ++value) {
+                selected_[value] = defaults.contains(static_cast<std::uint8_t>(value));
+            }
+            if (state.monitoring) {
+                start_monitor();
+            }
+        }
+        ImGui::EndCombo();
     }
 }
 
@@ -705,18 +800,41 @@ void App::connect() noexcept {
 }
 
 void App::start_monitor() noexcept {
-    common::ByteSet pids{};
-    for (std::uint32_t value{1U}; value <= 0xFFU; ++value) {
-        if (selected_[value]) {
-            pids = pids.with(static_cast<std::uint8_t>(value));
-        }
-    }
+    const common::ByteSet pids{selection()};
     reset_histories(pids);
     Request request{};
     request.kind = RequestKind::kStartMonitor;
     request.pids = pids;
     request.interval = std::chrono::milliseconds{interval_ms_};
     static_cast<void>(worker_->post(request));
+}
+
+void App::start_dashboard() noexcept {
+    const State& state{worker_->state()};
+    if (state.connected && state.pids_known) {
+        // Keep a selection with a gauge in it; otherwise show the default dashboard.
+        bool gauge{false};
+        for (std::uint32_t value{1U}; value <= 0xFFU; ++value) {
+            gauge = gauge || (selected_[value] && (find_gauge(static_cast<std::uint8_t>(value)) != nullptr));
+        }
+        if (!gauge) {
+            const common::ByteSet defaults{default_selection(state.supported_pids, kMaxMonitored)};
+            for (std::uint32_t value{1U}; value <= 0xFFU; ++value) {
+                selected_[value] = defaults.contains(static_cast<std::uint8_t>(value));
+            }
+        }
+        if (((!gauge) || (!state.monitoring)) && (selected_count() > 0U)) {
+            start_monitor();
+        }
+        dashboard_started_ = true;
+    }
+}
+
+void App::select(const std::uint8_t pid, const bool selected) noexcept {
+    selected_[pid] = selected;
+    if (worker_->state().monitoring) {
+        start_monitor();  // The monitor follows the selection.
+    }
 }
 
 void App::send_command() noexcept {
@@ -758,6 +876,16 @@ void App::detect_devices() noexcept {
             }
         }
     }
+}
+
+common::ByteSet App::selection() const noexcept {
+    common::ByteSet pids{};
+    for (std::uint32_t value{1U}; value <= 0xFFU; ++value) {
+        if (selected_[value]) {
+            pids = pids.with(static_cast<std::uint8_t>(value));
+        }
+    }
+    return pids;
 }
 
 std::size_t App::selected_count() const noexcept {

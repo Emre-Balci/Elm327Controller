@@ -48,7 +48,7 @@ constexpr std::int32_t kExitSuccess{0};
 constexpr std::int32_t kExitFailure{1};
 constexpr std::int32_t kExitUsage{2};
 
-constexpr std::array<std::string_view, 21U> kUsage{{
+constexpr std::array<std::string_view, 22U> kUsage{{
     "Usage: elm327gui [options]",
     "",
     "Graphical front-end for ELM327 OBD-II adapters: live data with plots, trouble codes, the VIN,",
@@ -62,13 +62,14 @@ constexpr std::array<std::string_view, 21U> kUsage{{
     "  -c, --connect         connect at the start",
     "  -m, --monitor PIDS    connect and monitor these PIDs, e.g. 0C,0D,05",
     "  -i, --interval MS     time between the samples of the monitor (default 1000)",
+    "  -w, --widgets         widget mode: the live data as the gauges of a dashboard",
     "      --tab NAME        open the tab live, codes, vehicle or terminal",
     "      --screenshot FILE save the window as a PPM image once it is idle, then exit",
     "  -h, --help            show this help",
     "      --version         show the version",
     "",
     "Without an adapter, run elm327sim and use the device it prints, e.g.",
-    "  elm327gui -d /dev/pts/5 --monitor 0C,0D",
+    "  elm327gui -d /dev/pts/5 --monitor 0C,0D       (or --connect --widgets)",
     "Ctrl+C in this terminal closes the window.",
 }};
 
@@ -227,6 +228,8 @@ bool apply_option(const std::string_view name, const char* const value, Argument
         arguments.screenshot = value;
     } else if ((name == "-c") || (name == "--connect")) {
         start.connect = true;
+    } else if ((name == "-w") || (name == "--widgets")) {
+        start.widgets = true;
     } else if ((name == "-h") || (name == "--help")) {
         arguments.help = true;
     } else if (name == "--version") {
