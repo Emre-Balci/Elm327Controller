@@ -7,8 +7,8 @@
 ///   --ignition-off  the car does not answer ("UNABLE TO CONNECT")
 ///   --slow          resets and the protocol search take as long as on a real adapter
 ///
-/// It prints the device to use with elm327ctl -d and runs until Ctrl+C. Like the tests, this tool
-/// is outside the compliance scope of the library.
+/// It prints the device to use with elm327ctl -d or elm327gui -d and runs until Ctrl+C. Like the
+/// tests, this tool is outside the compliance scope of the library.
 
 #include <pthread.h>
 #include <signal.h>
@@ -91,7 +91,9 @@ int main(const int argc, const char* const argv[]) {
     }
     std::printf("Simulated ELM327 on %s, %s car%s.\n", adapter.device_path().c_str(),
                 vehicle.can ? "CAN (ISO 15765-4)" : "ISO 9141-2", vehicle.ignition_on ? "" : " with the ignition off");
-    std::printf("Try: elm327ctl -d %s info\n", adapter.device_path().c_str());
+    std::printf("Try: elm327ctl -d %s         (the interactive shell)\n", adapter.device_path().c_str());
+    std::printf("     elm327ctl -d %s info    (one command)\n", adapter.device_path().c_str());
+    std::printf("     elm327gui -d %s --connect\n", adapter.device_path().c_str());
     std::printf("Stop with Ctrl+C.\n");
     static_cast<void>(std::fflush(stdout));
 

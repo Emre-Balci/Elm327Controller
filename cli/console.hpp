@@ -1,5 +1,5 @@
 /// @file console.hpp
-/// @brief Line-oriented text output of elm327ctl, without stdio and without heap.
+/// @brief Text output of elm327ctl, line by line, without stdio and without heap.
 
 #ifndef ELM327_CLI_CONSOLE_HPP
 #define ELM327_CLI_CONSOLE_HPP
@@ -78,14 +78,20 @@ public:
     /// Writes @p text and a newline.
     void print(std::string_view text) noexcept;
 
+    /// Writes @p text as it is, without a newline, e.g. a prompt or the escape sequences of the
+    /// line editor.
+    void write(common::Span<const char> text) noexcept;
+
     /// @return true once a write failed, e.g. into a closed pipe. Later lines are not written.
     [[nodiscard]] bool failed() const noexcept {
         return failed_;
     }
 
-private:
-    void write(common::Span<const char> text) noexcept;
+    [[nodiscard]] std::int32_t descriptor() const noexcept {
+        return descriptor_;
+    }
 
+private:
     std::int32_t descriptor_;
     bool failed_{false};
 };

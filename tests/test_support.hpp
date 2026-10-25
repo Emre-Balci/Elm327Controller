@@ -44,6 +44,13 @@ public:
         static_cast<void>(written);
     }
 
+    /// Makes the descriptor unreadable again, as an interactive program does before it goes on.
+    void clear() const {
+        std::uint64_t value{0U};
+        const ssize_t count{::read(descriptor_, &value, sizeof(value))};
+        static_cast<void>(count);
+    }
+
 private:
     int descriptor_;
 };

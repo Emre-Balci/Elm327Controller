@@ -1,3 +1,6 @@
 [submodule "third_party/common"]
 	path = third_party/common
 	url = https://github.com/Emre-Balci/Common.git
+[submodule "third_party/imgui"]
+	path = third_party/imgui
+	url = https://github.com/ocornut/imgui.git

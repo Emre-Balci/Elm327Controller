@@ -1,18 +1,27 @@
 cmake_minimum_required(VERSION 3.21)
 
 project(elm327controller
-    VERSION 0.1.0
-    DESCRIPTION "Command-line controller for ELM327 OBD-II adapters"
+    VERSION 0.2.0
+    DESCRIPTION "Library, interactive command-line tool and GUI for ELM327 OBD-II adapters"
     LANGUAGES CXX)
 
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
     message(FATAL_ERROR "Elm327Controller targets Linux only (use WSL on Windows)")
 endif()
 
+option(ELM327_BUILD_CLI "Build the elm327ctl command-line tool" ${PROJECT_IS_TOP_LEVEL})
 option(ELM327_BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
 option(ELM327_BUILD_SIMULATOR "Build the elm327sim adapter simulator" ${PROJECT_IS_TOP_LEVEL})
 option(ELM327_WARNINGS_AS_ERRORS "Treat warnings as errors" ${PROJECT_IS_TOP_LEVEL})
 option(ELM327_ENABLE_CLANG_TIDY "Run clang-tidy on this project's sources during the build" OFF)
+# AUTO builds the GUI when GLFW and the imgui submodule are there, ON requires them.
+if(PROJECT_IS_TOP_LEVEL)
+    set(ELM327_GUI_DEFAULT AUTO)
+else()
+    set(ELM327_GUI_DEFAULT OFF)
+endif()
+set(ELM327_BUILD_GUI ${ELM327_GUI_DEFAULT} CACHE STRING "Build the elm327gui ImGui front-end: ON, OFF or AUTO")
+set_property(CACHE ELM327_BUILD_GUI PROPERTY STRINGS ON OFF AUTO)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -38,46 +47,18 @@ if(ELM327_ENABLE_CLANG_TIDY)
     set(CMAKE_CXX_CLANG_TIDY ${ELM327_CLANG_TIDY_EXE})
 endif()
 
-configure_file(cmake/version.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/generated/elm327/version.hpp" @ONLY)
+# The two parts: the static library libelm327, and the front-ends built on it. The tests run the
+# command-line tool and the GUI's worker in-process, so their libraries are built for the tests too.
+add_subdirectory(lib)
 
-# The library: the ELM327 adapter protocol and the OBD-II services. Sources mirror the header
-# groups in include/elm327/<group>/.
-add_library(elm327
-    src/adapter/adapter.cpp
-    src/adapter/response.cpp
-    src/obd/client.cpp
-    src/obd/dtc.cpp
-    src/obd/message.cpp
-    src/obd/pid.cpp
-    src/obd/vin.cpp)
-add_library(elm327::elm327 ALIAS elm327)
+if(ELM327_BUILD_CLI OR ELM327_BUILD_TESTS)
+    add_subdirectory(cli)
+endif()
 
-target_include_directories(elm327 PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/include"
-    "${CMAKE_CURRENT_BINARY_DIR}/generated")
-target_link_libraries(elm327
-    PUBLIC common::common
-    PRIVATE common::options)
+add_subdirectory(gui)
 
-# The command-line tool. Everything except main() is a library, so the tests can run commands
-# in-process.
-add_library(elm327ctl_core STATIC
-    cli/commands.cpp
-    cli/console.cpp
-    cli/options.cpp
-    cli/signals.cpp)
-target_include_directories(elm327ctl_core PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
-target_link_libraries(elm327ctl_core
-    PUBLIC elm327::elm327
-    PRIVATE common::options)
-
-add_executable(elm327ctl cli/main.cpp)
-target_link_libraries(elm327ctl PRIVATE elm327ctl_core common::options)
-
-install(TARGETS elm327ctl RUNTIME DESTINATION bin)
-
-# The simulated adapter: a fixture of the tests, and the elm327sim tool to try the CLI without
-# hardware.
+# The simulated adapter: a fixture of the tests, and the elm327sim tool to try the front-ends
+# without hardware.
 if(ELM327_BUILD_TESTS OR ELM327_BUILD_SIMULATOR)
     add_subdirectory(sim)
 endif()

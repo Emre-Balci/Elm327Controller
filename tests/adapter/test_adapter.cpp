@@ -204,6 +204,40 @@ TEST_CASE(adapter_cancel) {
     CHECK((common::MonotonicClock::now() - start) < 2s);
 }
 
+TEST_CASE(adapter_settles_after_an_interruption) {
+    // The protocol search of the first OBD request takes long; the user interrupts it, and the
+    // adapter's late reply must not be taken for the reply to the next command.
+    for (const std::chrono::milliseconds search : {150ms, 900ms}) {
+        elm327::sim::Behaviour behaviour{};
+        behaviour.search_delay = search;
+        elm327::sim::FakeElm327 fake{elm327::sim::example_vehicle(), behaviour};
+        elm327::Adapter adapter{};
+        REQUIRE(open(adapter, fake));
+        REQUIRE(common::is_ok(adapter.initialize('0')));
+        test::Event event{};
+        REQUIRE(event.descriptor() >= 0);
+        adapter.set_cancel_descriptor(event.descriptor());
+        elm327::Response response{};
+        std::thread canceller{[&event]() {
+            std::this_thread::sleep_for(50ms);
+            event.signal();
+        }};
+        CHECK(adapter.execute("0100", response, common::Deadline::after(5s)) == common::Status::kInterrupted);
+        canceller.join();
+        event.clear();
+
+        // A short search ends while the adapter waits for it; a long one is stopped. Either way
+        // the next command gets its own reply.
+        REQUIRE(common::is_ok(adapter.execute("ATRV", response, common::Deadline::after(5s))));
+        REQUIRE(response.size() == 1U);
+        CHECK(test::string_of(response.line(0U)) == "12.6V");
+        REQUIRE(common::is_ok(adapter.execute("010D", response, common::Deadline::after(5s))));
+        CHECK(test::string_of(response.line(0U)) == "41 0D 2A");
+        const std::vector<std::string> commands{fake.commands()};
+        CHECK(commands.back() == "010D");
+    }
+}
+
 TEST_CASE(adapter_disconnected) {
     elm327::sim::FakeElm327 fake{};
     elm327::Adapter adapter{};
