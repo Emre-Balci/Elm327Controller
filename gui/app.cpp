@@ -11,8 +11,11 @@
 
 #include "common/protocol/text.hpp"
 #include "elm327/adapter/adapter.hpp"
+#include "elm327/expert/coding.hpp"
+#include "elm327/expert/uds.hpp"
 #include "elm327/obd/dtc.hpp"
 #include "elm327/obd/pid.hpp"
+#include "elm327/obd/service.hpp"
 #include "gui/gauge.hpp"
 #include "imgui.h"
 
@@ -137,6 +140,160 @@ std::int32_t milliseconds(const common::Duration duration) noexcept {
     return static_cast<std::int32_t>(std::chrono::duration_cast<std::chrono::milliseconds>(duration).count());
 }
 
+// Expert mode.
+
+/// Text of a reply or of a confirmation: up to 128 bytes in hexadecimal, and more.
+using LongText = common::StaticString<640U>;
+
+/// Bytes typed into a field: at most a whole command's worth.
+using HexBytes = common::StaticVector<std::uint8_t, Adapter::kMaxCommandLength / 2U>;
+
+/// Fields for one hexadecimal number, and for bytes separated by spaces.
+constexpr ImGuiInputTextFlags kHexFlags{ImGuiInputTextFlags_CharsHexadecimal | ImGuiInputTextFlags_CharsUppercase};
+constexpr ImGuiInputTextFlags kBytesFlags{ImGuiInputTextFlags_CharsUppercase};
+
+constexpr std::array<const char*, 4U> kSessionNames{
+    {"Default (01)", "Programming (02)", "Extended (03)", "Safety system (04)"}};
+constexpr std::array<expert::DiagnosticSession, 4U> kSessions{
+    {expert::DiagnosticSession::kDefault, expert::DiagnosticSession::kProgramming,
+     expert::DiagnosticSession::kExtended, expert::DiagnosticSession::kSafetySystem}};
+constexpr std::array<const char*, 3U> kRoutineNames{{"Start (01)", "Stop (02)", "Results (03)"}};
+constexpr std::array<expert::RoutineControlType, 3U> kRoutineTypes{
+    {expert::RoutineControlType::kStart, expert::RoutineControlType::kStop,
+     expert::RoutineControlType::kRequestResults}};
+constexpr std::array<const char*, 3U> kResetNames{{"Hard (01)", "Key off/on (02)", "Soft (03)"}};
+constexpr std::array<expert::EcuReset, 3U> kResets{
+    {expert::EcuReset::kHardReset, expert::EcuReset::kKeyOffOnReset, expert::EcuReset::kSoftReset}};
+constexpr std::array<const char*, 4U> kMakeNames{{"All makes", "VAG", "Renault", "BMW"}};
+constexpr std::array<expert::Make, 3U> kMakes{{expert::Make::kVag, expert::Make::kRenault, expert::Make::kBmw}};
+
+/// The highest seed level: its key goes with the next level, which must stay below 0x7F.
+constexpr std::uint16_t kMaxSeedLevel{0x7DU};
+
+/// The entry @p index of @p items, as chosen in a combo; the first one for an index out of range.
+template <typename T, std::size_t Size>
+T item_of(const std::array<T, Size>& items, const std::int32_t index) noexcept {
+    const std::size_t position{static_cast<std::size_t>(index)};
+    return (position < Size) ? items[position] : items[0U];
+}
+
+/// Shows @p text as the tooltip of the last widget, even when it is disabled.
+void tooltip(const std::string_view text) noexcept {
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
+        ImGui::BeginTooltip();
+        ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0F);
+        show(text);
+        ImGui::PopTextWrapPos();
+        ImGui::EndTooltip();
+    }
+}
+
+/// Shows @p text wrapped at the edge of the window, or of the table column.
+void show_wrapped(const ImVec4& color, const common::Span<const char> text) noexcept {
+    ImGui::PushTextWrapPos(0.0F);
+    show(color, text);
+    ImGui::PopTextWrapPos();
+}
+
+void show_wrapped(const ImVec4& color, const std::string_view text) noexcept {
+    show_wrapped(color, common::Span<const char>{text.data(), text.size()});
+}
+
+void show_wrapped(const std::string_view text) noexcept {
+    show_wrapped(ImGui::GetStyleColorVec4(ImGuiCol_Text), text);
+}
+
+void show_note(const std::string_view text) noexcept {
+    show_wrapped(ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled), text);
+}
+
+/// Parses one to @p digits hexadecimal digits, e.g. the DID "F190".
+common::Result<std::uint16_t> parse_number(const std::string_view text, const std::size_t digits) noexcept {
+    return ((!text.empty()) && (text.size() <= digits))
+               ? common::parse_hex<std::uint16_t>(common::Span<const char>{text.data(), text.size()})
+               : common::Result<std::uint16_t>::failure(common::Status::kInvalidArgument);
+}
+
+/// Decodes the hexadecimal bytes of @p text, e.g. "0A 1B" or "0A1B"; none for an empty text.
+common::Result<HexBytes> parse_bytes(const std::string_view text) noexcept {
+    std::array<std::uint8_t, Adapter::kMaxCommandLength / 2U> buffer{};
+    const common::Result<std::size_t> count{common::decode_hex_bytes(
+        common::Span<const char>{text.data(), text.size()}, common::Span<std::uint8_t>{buffer.data(), buffer.size()})};
+    HexBytes bytes{};
+    for (std::size_t index{0U}; index < count.value_or(0U); ++index) {
+        static_cast<void>(bytes.push_back(buffer[index]));  // Cannot fail: the buffer holds no more.
+    }
+    return count.has_value() ? common::Result<HexBytes>::success(bytes)
+                             : common::Result<HexBytes>::failure(count.status());
+}
+
+/// A request of the expert tab for the worker: the UDS request @p command, for what @p label says.
+Request make_uds_request(const std::string_view label, const std::string_view command) noexcept {
+    Request request{};
+    request.kind = RequestKind::kUds;
+    static_cast<void>(request.label.append(label));      // Cannot fail: the labels here are short.
+    static_cast<void>(request.command.append(command));  // Cannot fail: a built command fits.
+    return request;
+}
+
+/// Replaces @p text with @p message, e.g. what is wrong with a field.
+void say(common::StaticString<192U>& text, const std::string_view message) noexcept {
+    text.clear();
+    static_cast<void>(text.append(message));
+}
+
+const char* outcome_text(const UdsResult::Outcome outcome) noexcept {
+    const char* text{"failed"};
+    switch (outcome) {
+        case UdsResult::Outcome::kPositive:
+            text = "ok";
+            break;
+        case UdsResult::Outcome::kNegative:
+            text = "rejected";
+            break;
+        case UdsResult::Outcome::kRefused:
+            text = "refused";
+            break;
+        case UdsResult::Outcome::kFailed:
+            text = "failed";
+            break;
+    }
+    return text;
+}
+
+ImVec4 outcome_color(const UdsResult::Outcome outcome) noexcept {
+    ImVec4 color{kRed};
+    if (outcome == UdsResult::Outcome::kPositive) {
+        color = kGreen;
+    } else if (outcome == UdsResult::Outcome::kRefused) {
+        color = kYellow;
+    } else {
+        // Rejected or failed.
+    }
+    return color;
+}
+
+/// The data of a positive reply in hexadecimal, followed by the value of a data identifier as text
+/// when it is printable, e.g. a VIN.
+LongText reply_text(const expert::UdsExchange& exchange) noexcept {
+    LongText text{};
+    const common::Span<const std::uint8_t> data{exchange.data.data(), exchange.data.size()};
+    static_cast<void>(common::append_hex_bytes(text, data, ' '));
+    if ((exchange.service == expert::service_id(expert::UdsService::kReadDataByIdentifier)) && (data.size() > 2U)) {
+        std::array<char, expert::kMaxReplyData> printable{};
+        const common::Result<std::size_t> length{expert::format_printable(data.subspan(2U), printable)};
+        if (length.has_value()) {
+            static_cast<void>(text.append("   \"") &&
+                              text.append(common::Span<const char>{printable.data(), length.value()}) &&
+                              text.append("\""));
+        }
+    }
+    if (exchange.truncated) {
+        static_cast<void>(text.append(" ..."));
+    }
+    return text;
+}
+
 }  // namespace
 
 common::Result<std::int32_t> find_baud_index(const common::BaudRate baud_rate) noexcept {
@@ -158,6 +315,9 @@ App::App(Worker& worker) noexcept : worker_{&worker} {
     }
     baud_index_ = find_baud_index(common::BaudRate::k38400).value_or(0);
     fill(device_, common::Span<const char>{kDefaultDevice.data(), kDefaultDevice.size()});
+    // Expert mode starts with a harmless read ready: the VIN (DID F190), and the first seed level.
+    fill(did_, common::Span<const char>{"F190", 4U});
+    fill(security_level_, common::Span<const char>{"01", 2U});
 }
 
 void App::start(const StartOptions& options) noexcept {
@@ -171,6 +331,7 @@ void App::start(const StartOptions& options) noexcept {
     tab_ = options.tab;
     select_tab_ = true;
     widget_mode_ = options.widgets;
+    read_only_ = options.read_only;
     pending_monitor_ = options.monitor;
     for (std::uint32_t value{1U}; value <= 0xFFU; ++value) {
         selected_[value] = options.monitor.contains(static_cast<std::uint8_t>(value));
@@ -217,6 +378,10 @@ void App::draw() noexcept {
                     draw_terminal();
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem("Expert", nullptr, tab_flags(Tab::kExpert))) {
+                    draw_expert();
+                    ImGui::EndTabItem();
+                }
                 ImGui::EndTabBar();
             }
             select_tab_ = false;
@@ -257,6 +422,10 @@ void App::take_results() noexcept {
     for (std::size_t count{0U}; (count < Worker::kTraceCapacity) && worker_->take_trace(line); ++count) {
         log(line);
     }
+    UdsResult result{};
+    for (std::size_t count{0U}; (count < Worker::kUdsCapacity) && worker_->take_uds_result(result); ++count) {
+        log_uds(result);
+    }
 }
 
 void App::store(const Sample& sample) noexcept {
@@ -281,6 +450,13 @@ void App::log(const TraceLine& line) noexcept {
     log_[log_next_] = line;
     log_next_ = (log_next_ + 1U) % kLogSize;
     log_count_ = (log_count_ < kLogSize) ? (log_count_ + 1U) : kLogSize;
+}
+
+void App::log_uds(const UdsResult& result) noexcept {
+    uds_log_[uds_log_next_] = result;
+    uds_log_next_ = (uds_log_next_ + 1U) % kUdsLogSize;
+    uds_log_count_ = (uds_log_count_ < kUdsLogSize) ? (uds_log_count_ + 1U) : kUdsLogSize;
+    scroll_uds_log_ = true;
 }
 
 void App::draw_connection() noexcept {
@@ -319,6 +495,13 @@ void App::draw_connection() noexcept {
     static_cast<void>(ImGui::Combo("##protocol", &protocol_index_, protocol_items_.data(),
                                    static_cast<int>(protocol_items_.size())));
     ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Read-only", &read_only_)) {
+        if (state.connected) {
+            connect();  // Reconnect so the new access policy takes effect at once.
+        }
+    }
+    tooltip("Safe mode: refuse anything that could change the vehicle. Changing it while connected reconnects.");
     ImGui::SameLine();
     if (state.connected) {
         if (ImGui::Button("Disconnect")) {
@@ -762,6 +945,333 @@ void App::draw_terminal() noexcept {
     }
 }
 
+void App::draw_expert() noexcept {
+    const State& state{worker_->state()};
+    if (state.read_only) {
+        show_wrapped(kGreen, "Read-only mode is on: the requests that could change the vehicle are disabled here, "
+                             "and refused if sent anyway.");
+    } else {
+        show_wrapped(kYellow, "Expert mode sends UDS/KWP requests to an ECU. A write can change or disable a "
+                              "feature: each one is confirmed first, and a coding write backs up the value it "
+                              "changes. Turn on Read-only in the bar above to explore safely.");
+    }
+    const float font{ImGui::GetFontSize()};
+    if (ImGui::BeginChild("expert_controls", ImVec2{font * 31.0F, 0.0F}, ImGuiChildFlags_Borders)) {
+        draw_expert_controls(state);
+    }
+    ImGui::EndChild();
+    ImGui::SameLine();
+    if (ImGui::BeginChild("expert_results", ImVec2{0.0F, 0.0F})) {
+        draw_expert_results();
+        draw_coding_reference();
+    }
+    ImGui::EndChild();
+    draw_confirmation();
+}
+
+void App::draw_expert_controls(const State& state) noexcept {
+    const bool idle{state.connected && (!is_busy(state))};
+    const bool writes{idle && (!state.read_only)};  // The controls that can change the vehicle.
+    const float font{ImGui::GetFontSize()};
+    const std::string_view read_only_note{"Disabled in read-only mode."};
+    if (!state.connected) {
+        show_disabled("Connect to the adapter to talk to an ECU.");
+    }
+
+    ImGui::SeparatorText("Target ECU");
+    ImGui::BeginDisabled(!idle);
+    label("Header");
+    ImGui::SetNextItemWidth(font * 5.0F);
+    static_cast<void>(
+        ImGui::InputTextWithHint("##header", "7E0", target_header_.data(), target_header_.size(), kHexFlags));
+    ImGui::SameLine();
+    label("Reply");
+    ImGui::SetNextItemWidth(font * 5.0F);
+    static_cast<void>(
+        ImGui::InputTextWithHint("##reply", "any", target_reply_.data(), target_reply_.size(), kHexFlags));
+    ImGui::SameLine();
+    if (ImGui::Button("Apply")) {
+        apply_target();
+    }
+    ImGui::EndDisabled();
+    tooltip("The CAN identifier the requests go to (ATSH) and the one the replies come from (ATCRA, empty for "
+            "any), e.g. 7E0 and 7E8 for the engine ECU. Without a header the requests keep the adapter's. This "
+            "configures the adapter only.");
+
+    ImGui::SeparatorText("Session");
+    ImGui::BeginDisabled(!writes);
+    ImGui::SetNextItemWidth(font * 10.0F);
+    static_cast<void>(ImGui::Combo("##session", &session_index_, kSessionNames.data(),
+                                   static_cast<int>(kSessionNames.size())));
+    ImGui::SameLine();
+    if (ImGui::Button("Change...")) {
+        change_session();
+    }
+    ImGui::EndDisabled();
+    tooltip(state.read_only ? read_only_note
+                            : std::string_view{"DiagnosticSessionControl (10). Coding often needs the extended "
+                                               "session; the programming session is for flashing."});
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!idle);
+    if (ImGui::Button("Tester present")) {
+        tester_present();
+    }
+    ImGui::EndDisabled();
+    tooltip("TesterPresent (3E): checks that the ECU answers, and keeps a session open. Changes nothing.");
+
+    ImGui::SeparatorText("Data identifier");
+    ImGui::BeginDisabled(!idle);
+    label("DID");
+    ImGui::SetNextItemWidth(font * 5.0F);
+    static_cast<void>(ImGui::InputTextWithHint("##did", "F190", did_.data(), did_.size(), kHexFlags));
+    ImGui::SameLine();
+    if (ImGui::Button("Read")) {
+        read_did();
+    }
+    ImGui::EndDisabled();
+    tooltip("ReadDataByIdentifier (22): reads a value, e.g. F190 (the VIN), F187 (the part number) or a "
+            "coding block. Changes nothing.");
+    ImGui::BeginDisabled(!writes);
+    label("Value");
+    ImGui::SetNextItemWidth(font * -6.0F);
+    static_cast<void>(ImGui::InputTextWithHint("##value", "hex bytes, e.g. 01 or 0A 1B", value_.data(),
+                                               value_.size(), kBytesFlags));
+    ImGui::SameLine();
+    if (ImGui::Button("Write...")) {
+        write_did();
+    }
+    ImGui::EndDisabled();
+    tooltip(state.read_only ? read_only_note
+                            : std::string_view{"WriteDataByIdentifier (2E): coding and adaptation. It reads the "
+                                               "current value first, and writes only when it could, so the "
+                                               "value can be restored."});
+
+    ImGui::SeparatorText("Routine");
+    ImGui::BeginDisabled(!writes);
+    ImGui::SetNextItemWidth(font * 7.0F);
+    static_cast<void>(ImGui::Combo("##routine_type", &routine_type_index_, kRoutineNames.data(),
+                                   static_cast<int>(kRoutineNames.size())));
+    ImGui::SameLine();
+    label("ID");
+    ImGui::SetNextItemWidth(font * 5.0F);
+    static_cast<void>(ImGui::InputTextWithHint("##routine", "FF00", routine_.data(), routine_.size(), kHexFlags));
+    label("Data");
+    ImGui::SetNextItemWidth(font * -5.0F);
+    static_cast<void>(ImGui::InputTextWithHint("##routine_data", "optional hex bytes", routine_data_.data(),
+                                               routine_data_.size(), kBytesFlags));
+    ImGui::SameLine();
+    if (ImGui::Button("Run...")) {
+        run_routine();
+    }
+    ImGui::EndDisabled();
+    tooltip(state.read_only ? read_only_note
+                            : std::string_view{"RoutineControl (31): starts, stops or polls a routine of the ECU, "
+                                               "e.g. a calibration or an actuator test."});
+
+    ImGui::SeparatorText("Security access");
+    ImGui::BeginDisabled(!writes);
+    label("Level");
+    ImGui::SetNextItemWidth(font * 3.0F);
+    static_cast<void>(ImGui::InputTextWithHint("##level", "01", security_level_.data(), security_level_.size(),
+                                               kHexFlags));
+    ImGui::SameLine();
+    if (ImGui::Button("Request seed...")) {
+        request_seed();
+    }
+    label("Key");
+    ImGui::SetNextItemWidth(font * -7.0F);
+    static_cast<void>(ImGui::InputTextWithHint("##key", "from your own tooling", security_key_.data(),
+                                               security_key_.size(), kBytesFlags));
+    ImGui::SameLine();
+    if (ImGui::Button("Send key...")) {
+        send_key();
+    }
+    ImGui::EndDisabled();
+    show_note("SecurityAccess (27): the seed comes at the odd level, the key goes back at the next one. The key "
+              "is computed from the seed by your own licensed tooling, never here.");
+
+    ImGui::SeparatorText("ECU reset");
+    ImGui::BeginDisabled(!writes);
+    ImGui::SetNextItemWidth(font * 9.0F);
+    static_cast<void>(
+        ImGui::Combo("##reset", &reset_index_, kResetNames.data(), static_cast<int>(kResetNames.size())));
+    ImGui::SameLine();
+    if (ImGui::Button("Reset ECU...")) {
+        reset_ecu();
+    }
+    ImGui::EndDisabled();
+    tooltip(state.read_only ? read_only_note
+                            : std::string_view{"ECUReset (11): restarts the ECU at once. Never while driving."});
+
+    ImGui::SeparatorText("Any request");
+    const std::string_view typed{view_of(any_request_)};
+    const Access access{command_access(typed)};
+    const bool refused{state.read_only && (access != Access::kRead)};
+    ImGui::BeginDisabled(!idle);
+    ImGui::SetNextItemWidth(font * -5.0F);
+    const bool entered{ImGui::InputTextWithHint("##any", "hex, e.g. 22 F1 90", any_request_.data(),
+                                                any_request_.size(),
+                                                kBytesFlags | ImGuiInputTextFlags_EnterReturnsTrue)};
+    ImGui::SameLine();
+    ImGui::BeginDisabled(refused);
+    const bool clicked{ImGui::Button("Send")};
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    if ((clicked || entered) && idle && (!refused)) {
+        send_any();
+    }
+    if (!typed.empty()) {
+        // How the read-only gate sees the request.
+        Text text{};
+        static_cast<void>(text.append("Classified as ") && text.append(std::string_view{elm327::to_string(access)}));
+        const ImVec4 color{(access == Access::kRead) ? kGreen : ((access == Access::kWrite) ? kYellow : kRed)};
+        show(color, text.text());
+        if (refused) {
+            ImGui::SameLine();
+            show(kGreen, "- refused in read-only mode");
+        } else if (access != Access::kRead) {
+            ImGui::SameLine();
+            show_disabled("- asks for confirmation");
+        } else {
+            // A read goes at once.
+        }
+    }
+    if (!expert_error_.empty()) {
+        ImGui::Spacing();
+        show_wrapped(kRed, expert_error_.text());
+    }
+}
+
+void App::draw_expert_results() noexcept {
+    const float font{ImGui::GetFontSize()};
+    ImGui::SeparatorText("Results");
+    // The coding reference below takes half the room when it is open.
+    const float available{ImGui::GetContentRegionAvail().y};
+    const float reserve{coding_open_ ? (available * 0.5F) : (ImGui::GetFrameHeightWithSpacing() * 2.5F)};
+    const float minimum{font * 6.0F};
+    const float height{((available - reserve) > minimum) ? (available - reserve) : minimum};
+    const ImGuiTableFlags flags{ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV |
+                                ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable};
+    if (ImGui::BeginTable("uds_results", 4, flags, ImVec2{0.0F, height})) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("For", ImGuiTableColumnFlags_WidthFixed, font * 6.5F);
+        ImGui::TableSetupColumn("Request", ImGuiTableColumnFlags_WidthFixed, font * 8.5F);
+        ImGui::TableSetupColumn("Result", ImGuiTableColumnFlags_WidthFixed, font * 4.5F);
+        ImGui::TableSetupColumn("Reply", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableHeadersRow();
+        if (uds_log_count_ == 0U) {
+            ImGui::TableNextRow();
+            static_cast<void>(ImGui::TableNextColumn());
+            show_disabled("None yet.");
+        }
+        const std::size_t first{(uds_log_next_ + kUdsLogSize) - uds_log_count_};
+        for (std::size_t row{0U}; row < uds_log_count_; ++row) {
+            const UdsResult& result{uds_log_[(first + row) % kUdsLogSize]};
+            ImGui::TableNextRow();
+            static_cast<void>(ImGui::TableNextColumn());
+            show(result.label.text());
+            static_cast<void>(ImGui::TableNextColumn());
+            show(kBlue, result.request.text());
+            static_cast<void>(ImGui::TableNextColumn());
+            show(outcome_color(result.outcome), std::string_view{outcome_text(result.outcome)});
+            static_cast<void>(ImGui::TableNextColumn());
+            if (result.outcome == UdsResult::Outcome::kPositive) {
+                const LongText reply{reply_text(result.exchange)};
+                show_wrapped(reply.view());
+            } else {
+                show_wrapped(outcome_color(result.outcome), result.reason.text());
+            }
+        }
+        if (scroll_uds_log_) {
+            ImGui::SetScrollHereY(1.0F);  // Show the newest result.
+            scroll_uds_log_ = false;
+        }
+        ImGui::EndTable();
+    }
+    ImGui::BeginDisabled(uds_log_count_ == 0U);
+    if (ImGui::Button("Clear results")) {
+        uds_log_count_ = 0U;
+    }
+    ImGui::EndDisabled();
+}
+
+void App::draw_coding_reference() noexcept {
+    coding_open_ = ImGui::CollapsingHeader("Coding reference: VAG, Renault, BMW");
+    if (coding_open_) {
+        const float font{ImGui::GetFontSize()};
+        label("Make");
+        ImGui::SetNextItemWidth(font * 8.0F);
+        static_cast<void>(
+            ImGui::Combo("##make", &coding_make_index_, kMakeNames.data(), static_cast<int>(kMakeNames.size())));
+        show_note("Where a feature usually lives and how it is coded -- not the values, which differ by model, "
+                  "year and firmware. Look them up for your own vehicle, read the current value, change one "
+                  "documented field, and keep the original to restore it.");
+        const bool all{coding_make_index_ <= 0};
+        const expert::Make wanted{item_of(kMakes, coding_make_index_ - 1)};
+        const float available{ImGui::GetContentRegionAvail().y};
+        const float height{(available > (font * 6.0F)) ? available : (font * 6.0F)};
+        const ImGuiTableFlags flags{ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersV |
+                                    ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable};
+        if (ImGui::BeginTable("coding", 5, flags, ImVec2{0.0F, height})) {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableSetupColumn("Make", ImGuiTableColumnFlags_WidthFixed, font * 4.5F);
+            ImGui::TableSetupColumn("Feature", ImGuiTableColumnFlags_WidthStretch, 1.2F);
+            ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthStretch, 1.2F);
+            ImGui::TableSetupColumn("How", ImGuiTableColumnFlags_WidthStretch, 1.5F);  // Fits "WriteDataByIdentifier".
+            ImGui::TableSetupColumn("Check on your car", ImGuiTableColumnFlags_WidthStretch, 2.3F);
+            ImGui::TableHeadersRow();
+            for (const expert::CodingHint& hint : expert::coding_catalog()) {
+                if (all || (hint.make == wanted)) {
+                    ImGui::TableNextRow();
+                    static_cast<void>(ImGui::TableNextColumn());
+                    show(std::string_view{expert::make_name(hint.make)});
+                    static_cast<void>(ImGui::TableNextColumn());
+                    show_wrapped(hint.feature);
+                    static_cast<void>(ImGui::TableNextColumn());
+                    show_wrapped(hint.module);
+                    static_cast<void>(ImGui::TableNextColumn());
+                    show_wrapped(hint.method);
+                    static_cast<void>(ImGui::TableNextColumn());
+                    show_wrapped(hint.note);
+                }
+            }
+            ImGui::EndTable();
+        }
+    }
+}
+
+void App::draw_confirmation() noexcept {
+    constexpr const char* kTitle{"Confirm a request that can change the vehicle"};
+    if (open_confirmation_) {
+        ImGui::OpenPopup(kTitle);
+        open_confirmation_ = false;
+        confirmed_ = false;
+    }
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(), ImGuiCond_Appearing, ImVec2{0.5F, 0.5F});
+    if (ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        const float font{ImGui::GetFontSize()};
+        ImGui::PushTextWrapPos(font * 32.0F);
+        show(kYellow, "This request can change the vehicle.");
+        ImGui::Spacing();
+        show(pending_summary_.text());
+        ImGui::PopTextWrapPos();
+        ImGui::Spacing();
+        static_cast<void>(ImGui::Checkbox("I have backed up what this changes, and I accept the risk.", &confirmed_));
+        ImGui::Spacing();
+        ImGui::BeginDisabled(!confirmed_);
+        if (ImGui::Button("Send", ImVec2{font * 6.0F, 0.0F})) {
+            static_cast<void>(worker_->post(pending_));
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2{font * 6.0F, 0.0F})) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+}
+
 void App::draw_status() noexcept {
     const State& state{worker_->state()};
     ImGui::Separator();
@@ -796,6 +1306,7 @@ void App::connect() noexcept {
     Request request{};
     request.kind = RequestKind::kConnect;
     request.settings = settings();
+    request.read_only = read_only_;
     static_cast<void>(worker_->post(request));
 }
 
@@ -846,6 +1357,196 @@ void App::send_command() noexcept {
         static_cast<void>(worker_->post(request));
         command_[0U] = '\0';
         scroll_log_ = true;
+    }
+}
+
+void App::submit(const Request& request, const bool writes, const common::Span<const char> summary) noexcept {
+    expert_error_.clear();
+    if (writes) {
+        pending_ = request;
+        pending_summary_.clear();
+        static_cast<void>(pending_summary_.append(summary));
+        open_confirmation_ = true;
+    } else {
+        static_cast<void>(worker_->post(request));
+    }
+}
+
+void App::apply_target() noexcept {
+    const std::string_view header{view_of(target_header_)};
+    const std::string_view reply{view_of(target_reply_)};
+    const bool header_valid{header.empty() || (header.size() == 3U) || (header.size() == 6U) || (header.size() == 8U)};
+    const bool reply_valid{reply.empty() || (reply.size() == 3U) || (reply.size() == 8U)};
+    if ((!header_valid) || (!reply_valid)) {
+        say(expert_error_, "A header has 3, 6 or 8 hexadecimal digits (e.g. 7E0), a reply address 3 or 8 (e.g. 7E8).");
+    } else {
+        expert_error_.clear();
+        Request request{};
+        request.kind = RequestKind::kRaw;
+        if (!header.empty()) {
+            static_cast<void>(request.command.append("ATSH") && request.command.append(header));
+            static_cast<void>(worker_->post(request));
+        }
+        request.command.clear();
+        static_cast<void>(request.command.append("ATCRA") && request.command.append(reply));  // Alone: any reply.
+        static_cast<void>(worker_->post(request));
+    }
+}
+
+void App::change_session() noexcept {
+    expert::UdsCommand command{};
+    static_cast<void>(expert::uds_session_control(item_of(kSessions, session_index_), command));
+    LongText summary{};
+    static_cast<void>(summary.append("Change the diagnostic session to ") &&
+                      summary.append(std::string_view{item_of(kSessionNames, session_index_)}) &&
+                      summary.append(", with ") && summary.append(command.view()) &&
+                      summary.append(". Outside the default session some functions of the ECU stop until it "
+                                     "returns to it; the programming session is meant for flashing."));
+    submit(make_uds_request("session", command.view()), true, summary.text());
+}
+
+void App::tester_present() noexcept {
+    expert::UdsCommand command{};
+    static_cast<void>(expert::uds_tester_present(false, command));  // Ask for the answer.
+    submit(make_uds_request("tester present", command.view()), false, common::Span<const char>{});
+}
+
+void App::read_did() noexcept {
+    const common::Result<std::uint16_t> did{parse_number(view_of(did_), 4U)};
+    if (!did.has_value()) {
+        say(expert_error_, "A DID has 1 to 4 hexadecimal digits, e.g. F190.");
+    } else {
+        expert::UdsCommand command{};
+        static_cast<void>(expert::uds_read_data_by_identifier(did.value(), command));
+        submit(make_uds_request("read", command.view()), false, common::Span<const char>{});
+    }
+}
+
+void App::write_did() noexcept {
+    const common::Result<std::uint16_t> did{parse_number(view_of(did_), 4U)};
+    const common::Result<HexBytes> value{parse_bytes(view_of(value_))};
+    if (!did.has_value()) {
+        say(expert_error_, "A DID has 1 to 4 hexadecimal digits, e.g. F190.");
+    } else if ((!value.has_value()) || value.value().empty() || (value.value().size() > expert::kMaxRequestData)) {
+        say(expert_error_, "The value is 1 to 29 bytes in hexadecimal, e.g. 01 or 0A 1B.");
+    } else {
+        Request request{};
+        request.kind = RequestKind::kUdsWrite;
+        request.did = did.value();
+        for (const std::uint8_t byte : value.value()) {
+            static_cast<void>(request.value.push_back(byte));  // Cannot fail: the size is checked above.
+        }
+        const common::Span<const std::uint8_t> bytes{value.value().data(), value.value().size()};
+        LongText summary{};
+        static_cast<void>(
+            summary.append("Write ") && common::append_hex_bytes(summary, bytes, ' ') &&
+            summary.append(" to the data identifier ") && common::append_hex(summary, did.value(), 4U) &&
+            summary.append(" (WriteDataByIdentifier). The current value is read first and kept in the results; if "
+                           "it cannot be read, nothing is written. The value is read again after the write."));
+        submit(request, true, summary.text());
+    }
+}
+
+void App::run_routine() noexcept {
+    const common::Result<std::uint16_t> routine{parse_number(view_of(routine_), 4U)};
+    const common::Result<HexBytes> data{parse_bytes(view_of(routine_data_))};
+    const expert::RoutineControlType type{item_of(kRoutineTypes, routine_type_index_)};
+    expert::UdsCommand command{};
+    bool built{false};
+    if (routine.has_value() && data.has_value()) {
+        built = expert::uds_routine_control(
+            type, routine.value(), common::Span<const std::uint8_t>{data.value().data(), data.value().size()}, command);
+    }
+    if (!routine.has_value()) {
+        say(expert_error_, "A routine ID has 1 to 4 hexadecimal digits, e.g. FF00.");
+    } else if (!built) {
+        say(expert_error_, "The data is hexadecimal bytes, few enough for one request.");
+    } else {
+        LongText summary{};
+        static_cast<void>(summary.append("RoutineControl ") &&
+                          summary.append(std::string_view{item_of(kRoutineNames, routine_type_index_)}) &&
+                          summary.append(" of routine ") && common::append_hex(summary, routine.value(), 4U) &&
+                          summary.append(", with ") && summary.append(command.view()) &&
+                          summary.append(". A routine can move actuators, run a calibration or erase learned values: "
+                                         "run it only as its documentation says, with the vehicle standing."));
+        submit(make_uds_request("routine", command.view()), true, summary.text());
+    }
+}
+
+void App::request_seed() noexcept {
+    const common::Result<std::uint16_t> level{parse_number(view_of(security_level_), 2U)};
+    if ((!level.has_value()) || ((static_cast<std::uint32_t>(level.value()) % 2U) == 0U) ||
+        (level.value() > kMaxSeedLevel)) {
+        say(expert_error_, "The level of a seed is odd, 01 to 7D, e.g. 01; the key goes back at the next level.");
+    } else {
+        expert::UdsCommand command{};
+        static_cast<void>(expert::uds_security_request_seed(static_cast<std::uint8_t>(level.value()), command));
+        LongText summary{};
+        static_cast<void>(summary.append("Request a security seed at level ") &&
+                          common::append_hex(summary, level.value(), 2U) && summary.append(", with ") &&
+                          summary.append(command.view()) &&
+                          summary.append(". The ECU answers with a seed; the key for it comes from your own tooling. "
+                                         "This starts the unlock sequence, and some ECUs count the attempts."));
+        submit(make_uds_request("security seed", command.view()), true, summary.text());
+    }
+}
+
+void App::send_key() noexcept {
+    const common::Result<std::uint16_t> level{parse_number(view_of(security_level_), 2U)};
+    const common::Result<HexBytes> key{parse_bytes(view_of(security_key_))};
+    if ((!level.has_value()) || ((static_cast<std::uint32_t>(level.value()) % 2U) == 0U) ||
+        (level.value() > kMaxSeedLevel)) {
+        say(expert_error_, "The level of the seed is odd, 01 to 7D; the key goes back at the next level.");
+    } else if ((!key.has_value()) || key.value().empty()) {
+        say(expert_error_, "The key is hexadecimal bytes, as your own tooling computed it from the seed.");
+    } else {
+        const std::uint8_t key_level{static_cast<std::uint8_t>(level.value() + 1U)};
+        expert::UdsCommand command{};
+        if (!expert::uds_security_send_key(
+                key_level, common::Span<const std::uint8_t>{key.value().data(), key.value().size()}, command)) {
+            say(expert_error_, "The key is too long for one request.");
+        } else {
+            LongText summary{};
+            static_cast<void>(summary.append("Send the key at level ") && common::append_hex(summary, key_level, 2U) &&
+                              summary.append(", with ") && summary.append(command.view()) &&
+                              summary.append(". A wrong key counts as a failed attempt; after a few, the ECU refuses "
+                                             "access for a while (exceedNumberOfAttempts)."));
+            submit(make_uds_request("security key", command.view()), true, summary.text());
+        }
+    }
+}
+
+void App::reset_ecu() noexcept {
+    expert::UdsCommand command{};
+    static_cast<void>(expert::uds_ecu_reset(item_of(kResets, reset_index_), command));
+    LongText summary{};
+    static_cast<void>(summary.append("Reset the ECU: ") &&
+                      summary.append(std::string_view{item_of(kResetNames, reset_index_)}) &&
+                      summary.append(", with ") && summary.append(command.view()) &&
+                      summary.append(". It restarts at once, and may leave its session and forget learned values. "
+                                     "Never do this while driving."));
+    submit(make_uds_request("ecu reset", command.view()), true, summary.text());
+}
+
+void App::send_any() noexcept {
+    const common::Result<HexBytes> bytes{parse_bytes(view_of(any_request_))};
+    expert::UdsCommand command{};
+    bool built{false};
+    if (bytes.has_value() && (!bytes.value().empty())) {
+        const common::Span<const std::uint8_t> all{bytes.value().data(), bytes.value().size()};
+        built = expert::uds_request(all[0U], all.subspan(1U), command);
+    }
+    if (!built) {
+        say(expert_error_, "Type the request in hexadecimal bytes, e.g. 22 F1 90 (at most 32 bytes).");
+    } else {
+        const Access access{command_access(command.view())};
+        LongText summary{};
+        static_cast<void>(summary.append("Send ") && summary.append(command.view()) && summary.append(" (") &&
+                          summary.append(std::string_view{expert::uds_service_name(bytes.value()[0U])}) &&
+                          summary.append("), which the read-only gate classifies as ") &&
+                          summary.append(std::string_view{elm327::to_string(access)}) &&
+                          summary.append(". Check what it does to your ECU before you send it."));
+        submit(make_uds_request("request", command.view()), access != Access::kRead, summary.text());
     }
 }
 

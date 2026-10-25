@@ -54,7 +54,8 @@ void complete(const common::Span<const char> before, LineEditor::Candidates& can
             source = shell_commands();
         } else if (set && (words.size() == 1U)) {
             source = setting_names();
-        } else if (set && (words.size() == 2U) && common::equals(words[1U], "verbose")) {
+        } else if (set && (words.size() == 2U) &&
+                   (common::equals(words[1U], "verbose") || common::equals(words[1U], "readonly"))) {
             source = common::Span<const std::string_view>{kVerboseValues.data(), kVerboseValues.size()};
         } else if (set && (words.size() == 2U) && common::equals(words[1U], "protocol")) {
             source = common::Span<const std::string_view>{kProtocolValues.data(), kProtocolValues.size()};
@@ -206,6 +207,9 @@ void Shell::handle(const common::Span<const char> text) noexcept {
             case Command::kDtc:
             case Command::kVin:
             case Command::kRaw:
+            case Command::kClear:
+            case Command::kUds:
+            case Command::kCoding:
             case Command::kDisconnect:
                 exit_code_ = session_.run(options);
                 break;
@@ -276,6 +280,7 @@ void Shell::show() noexcept {
     }
     out_->print(count);
     out_->print(Line{}.text("Verbose").pad(kLabelWidth).text(settings_.verbose ? "on" : "off"));
+    out_->print(Line{}.text("Read-only").pad(kLabelWidth).text(settings_.read_only ? "on" : "off"));
     Line state{};
     state.text("Connection").pad(kLabelWidth);
     const Controller& controller{session_.controller()};

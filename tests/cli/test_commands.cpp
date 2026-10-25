@@ -279,3 +279,132 @@ TEST_CASE(cli_interrupted_while_connecting) {
     CHECK(outcome.out.empty());
     CHECK(outcome.err == "elm327ctl: connecting to the vehicle: interrupted\n");
 }
+
+TEST_CASE(cli_read_only_blocks_raw_write) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome outcome{run_cli({"-d", fake.device_path(), "-r", "raw", "ATRV", "04"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(outcome.out, "12.6V"));  // The read command still went through.
+    CHECK(contains(outcome.err, "04: refused in read-only mode"));
+}
+
+TEST_CASE(cli_clear_needs_confirmation_and_clears) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome unconfirmed{run_cli({"-d", fake.device_path(), "clear"})};
+    CHECK(unconfirmed.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(unconfirmed.err, "Pass -y"));
+
+    const Outcome cleared{run_cli({"-d", fake.device_path(), "-y", "clear"})};
+    CHECK(cleared.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(cleared.out, "Cleared the DTCs"));
+}
+
+TEST_CASE(cli_clear_refused_in_read_only) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome outcome{run_cli({"-d", fake.device_path(), "-r", "-y", "clear"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(outcome.err, "refused in read-only mode"));
+    for (const std::string& command : fake.commands()) {
+        CHECK(command.substr(0U, 2U) != "04");  // The clear never reached the vehicle.
+    }
+}
+
+TEST_CASE(cli_uds_read_and_write_with_backup) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome read{run_cli({"-d", fake.device_path(), "uds", "read", "0407"})};
+    CHECK(read.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(read.out, "ReadDataByIdentifier ok"));
+
+    const Outcome written{run_cli({"-d", fake.device_path(), "-y", "uds", "write", "0407", "01"})};
+    CHECK(written.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(written.out, "current value"));  // Reads and shows the old value first.
+    CHECK(contains(written.out, "WriteDataByIdentifier ok"));
+    CHECK(contains(written.out, "new value"));
+}
+
+TEST_CASE(cli_uds_write_refused_in_read_only) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome outcome{run_cli({"-d", fake.device_path(), "-r", "uds", "write", "0407", "01"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(outcome.err, "refused in read-only mode"));
+    for (const std::string& command : fake.commands()) {
+        CHECK(command.substr(0U, 2U) != "2E");  // The write never reached the vehicle.
+    }
+}
+
+TEST_CASE(cli_uds_help) {
+    const Outcome outcome{run_cli({"-d", "/dev/null", "uds", "help"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitSuccess);  // 'help' needs no adapter.
+    CHECK(contains(outcome.out, "uds read DID"));
+    CHECK(contains(outcome.out, "refused there before anything is sent"));
+}
+
+TEST_CASE(cli_coding_catalog) {
+    const Outcome all{run_cli({"coding"})};
+    CHECK(all.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(all.out, "Reference only"));
+    CHECK(contains(all.out, "VAG"));
+    CHECK(contains(all.out, "Renault"));
+    CHECK(contains(all.out, "BMW"));
+
+    const Outcome bmw{run_cli({"coding", "bmw"})};
+    CHECK(bmw.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(bmw.out, "BMW"));
+    CHECK(!contains(bmw.out, "VAG"));
+
+    const Outcome bad{run_cli({"coding", "ferrari"})};
+    CHECK(bad.exit_code == elm327::cli::kExitUsage);
+    CHECK(contains(bad.err, "unknown make"));
+}
+
+TEST_CASE(cli_uds_read_shows_printable_values) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome outcome{run_cli({"-d", fake.device_path(), "uds", "read", "F190"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(outcome.out,
+                   "read: ReadDataByIdentifier ok\n"
+                   "  data  F1 90 31 44 34 47 50 30 30 52 35 35 42 31 32 33 34 35 36\n"
+                   "  text  \"1D4GP00R55B123456\"\n"));
+
+    // A value that is not text shows no text line.
+    const Outcome coding{run_cli({"-d", fake.device_path(), "uds", "read", "0407"})};
+    CHECK(coding.exit_code == elm327::cli::kExitSuccess);
+    CHECK(!contains(coding.out, "text"));
+}
+
+TEST_CASE(cli_uds_write_needs_a_backup) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    // DID 1234 cannot be read, so there would be nothing to restore: nothing is written.
+    const Outcome outcome{run_cli({"-d", fake.device_path(), "-y", "uds", "write", "1234", "01"})};
+    CHECK(outcome.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(outcome.err, "current value: negative response, requestOutOfRange (0x31)"));
+    CHECK(contains(outcome.err, "cannot read the current value to back it up, so nothing was written"));
+    for (const std::string& command : fake.commands()) {
+        CHECK(command.substr(0U, 2U) != "2E");
+    }
+}
+
+TEST_CASE(cli_uds_tester_and_addressing) {
+    elm327::sim::FakeElm327 fake{};
+    REQUIRE(fake.valid());
+    const Outcome tester{run_cli({"-d", fake.device_path(), "uds", "tester"})};
+    CHECK(tester.exit_code == elm327::cli::kExitSuccess);
+    CHECK(contains(tester.out, "tester present: TesterPresent ok\n"));
+
+    // With the suppress-positive-response bit the ECU stays silent, and the adapter says NO DATA.
+    const Outcome silent{run_cli({"-d", fake.device_path(), "uds", "send", "3E", "80"})};
+    CHECK(silent.exit_code == elm327::cli::kExitFailure);
+    CHECK(contains(silent.err, "uds: NO DATA"));
+
+    // The CAN addressing of expert mode: header, receive filter, and the filter reset.
+    const Outcome addressing{run_cli({"-d", fake.device_path(), "raw", "ATSH7E0", "ATCRA7E8", "ATCRA"})};
+    CHECK(addressing.exit_code == elm327::cli::kExitSuccess);
+    CHECK(addressing.out == "> ATSH7E0\nOK\n> ATCRA7E8\nOK\n> ATCRA\nOK\n");
+}

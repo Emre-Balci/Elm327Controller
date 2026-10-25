@@ -11,10 +11,13 @@ add_library(elm327 STATIC
     src/controller/explain.cpp
     src/controller/signals.cpp
     src/controller/timing.cpp
+    src/expert/coding.cpp
+    src/expert/uds.cpp
     src/obd/client.cpp
     src/obd/dtc.cpp
     src/obd/message.cpp
     src/obd/pid.cpp
+    src/obd/service.cpp
     src/obd/vin.cpp)
 add_library(elm327::elm327 ALIAS elm327)
 

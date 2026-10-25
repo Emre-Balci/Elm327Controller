@@ -21,6 +21,8 @@ enum class OptionId : std::uint8_t {
     kInterval,
     kCount,
     kVerbose,
+    kReadOnly,
+    kYes,
     kHelp,
     kVersion,
 };
@@ -34,7 +36,7 @@ struct OptionSpec final {
     bool connection;           ///< A setting of the connection: on a line of the shell, use 'set' instead.
 };
 
-constexpr std::array<OptionSpec, 9U> kOptionSpecs{{
+constexpr std::array<OptionSpec, 11U> kOptionSpecs{{
     {OptionId::kDevice, "-d", "--device", true, "device", true},
     {OptionId::kBaud, "-b", "--baud", true, "baud", true},
     {OptionId::kProtocol, "-p", "--protocol", true, "protocol", true},
@@ -42,6 +44,8 @@ constexpr std::array<OptionSpec, 9U> kOptionSpecs{{
     {OptionId::kInterval, "-i", "--interval", true, "interval", false},
     {OptionId::kCount, "-n", "--count", true, "count", false},
     {OptionId::kVerbose, "-v", "--verbose", false, "verbose", false},
+    {OptionId::kReadOnly, "-r", "--read-only", false, "readonly", false},
+    {OptionId::kYes, "-y", "--yes", false, "", false},
     {OptionId::kHelp, "-h", "--help", false, "", false},
     {OptionId::kVersion, "", "--version", false, "", false},
 }};
@@ -52,7 +56,7 @@ struct CommandSpec final {
     bool shell_only;
 };
 
-constexpr std::array<CommandSpec, 14U> kCommandSpecs{{
+constexpr std::array<CommandSpec, 17U> kCommandSpecs{{
     {Command::kInfo, "info", false},
     {Command::kPids, "pids", false},
     {Command::kRead, "read", false},
@@ -60,6 +64,9 @@ constexpr std::array<CommandSpec, 14U> kCommandSpecs{{
     {Command::kDtc, "dtc", false},
     {Command::kVin, "vin", false},
     {Command::kRaw, "raw", false},
+    {Command::kClear, "clear", false},
+    {Command::kUds, "uds", false},
+    {Command::kCoding, "coding", false},
     {Command::kHelp, "help", false},
     {Command::kConnect, "connect", true},
     {Command::kDisconnect, "disconnect", true},
@@ -71,20 +78,20 @@ constexpr std::array<CommandSpec, 14U> kCommandSpecs{{
 
 /// The names of kCommandSpecs, for completion.
 constexpr std::array<std::string_view, kCommandSpecs.size()> kCommandNames{{
-    "info", "pids", "read", "monitor", "dtc", "vin", "raw", "help", "connect", "disconnect", "set", "show", "quit",
-    "exit",
+    "info", "pids",       "read", "monitor", "dtc", "vin",  "raw",  "clear", "uds",
+    "coding", "help",     "connect", "disconnect", "set", "show", "quit", "exit",
 }};
 
 /// The settings of kOptionSpecs, for completion.
-constexpr std::array<std::string_view, 7U> kSettingNames{{
-    "device", "baud", "protocol", "timeout", "interval", "count", "verbose",
+constexpr std::array<std::string_view, 8U> kSettingNames{{
+    "device", "baud", "protocol", "timeout", "interval", "count", "verbose", "readonly",
 }};
 
 /// The values of 'set verbose'.
 constexpr std::array<std::string_view, 4U> kOnWords{{"on", "yes", "true", "1"}};
 constexpr std::array<std::string_view, 4U> kOffWords{{"off", "no", "false", "0"}};
 
-constexpr std::array<std::string_view, 27U> kUsage{{
+constexpr std::array<std::string_view, 32U> kUsage{{
     "Usage: elm327ctl [options] [command [arguments]]",
     "",
     "Talks to an ELM327 OBD-II adapter on a serial port. Without a command, elm327ctl starts an",
@@ -97,7 +104,10 @@ constexpr std::array<std::string_view, 27U> kUsage{{
     "  monitor PID...    read PIDs repeatedly until Ctrl+C (see -i, -n)",
     "  dtc               read the MIL status and the stored, pending and permanent DTCs",
     "  vin               read the vehicle identification number",
+    "  clear             clear the DTCs and turn the MIL off (service 04; needs -y)",
     "  raw COMMAND...    send AT commands or OBD requests and print the replies",
+    "  uds SUBCOMMAND    expert mode: UDS/KWP requests to an ECU (try 'uds help')",
+    "  coding [MAKE]     reference list of common owner codings (vag, renault, bmw)",
     "  help              show this help",
     "",
     "Options:",
@@ -107,14 +117,16 @@ constexpr std::array<std::string_view, 27U> kUsage{{
     "  -t, --timeout MS    reply timeout of a command in ms (default 5000)",
     "  -i, --interval MS   monitor: time between samples in ms (default 1000)",
     "  -n, --count N       monitor: stop after N samples (default 0: until Ctrl+C)",
+    "  -r, --read-only     safe mode: refuse any command that could change the vehicle",
+    "  -y, --yes           confirm a write (clear, uds write) without prompting",
     "  -v, --verbose       print the traffic with the adapter on stderr",
     "  -h, --help          show this help",
     "      --version       show the version",
     "",
-    "In the shell, the options are its settings at the start.",
+    "In the shell, the options are its settings at the start (change them with 'set').",
 }};
 
-constexpr std::array<std::string_view, 33U> kShellHelp{{
+constexpr std::array<std::string_view, 40U> kShellHelp{{
     "Commands:",
     "  connect [DEVICE]  connect to the adapter, at DEVICE if given (it becomes the device setting)",
     "  disconnect        close the connection",
@@ -124,7 +136,10 @@ constexpr std::array<std::string_view, 33U> kShellHelp{{
     "  monitor PID...    read PIDs repeatedly until Ctrl+C (see the interval and count settings)",
     "  dtc               read the MIL status and the stored, pending and permanent DTCs",
     "  vin               read the vehicle identification number",
+    "  clear             clear the DTCs and turn the MIL off (service 04; needs -y)",
     "  raw COMMAND...    send AT commands or OBD requests and print the replies",
+    "  uds SUBCOMMAND    expert mode: UDS/KWP requests to an ECU (try 'uds help')",
+    "  coding [MAKE]     reference list of common owner codings (vag, renault, bmw)",
     "  set NAME VALUE    change a setting",
     "  show              show the settings and the connection (also 'set' alone)",
     "  help              show this help",
@@ -138,9 +153,13 @@ constexpr std::array<std::string_view, 33U> kShellHelp{{
     "  interval MS       monitor: time between samples in ms",
     "  count N           monitor: stop after N samples (0: until Ctrl+C)",
     "  verbose on|off    print the traffic with the adapter",
+    "  readonly on|off   safe mode: refuse any command that could change the vehicle",
     "",
     "The commands that need the adapter connect to it first, and the connection stays open. A",
     "change of device, baud, protocol or timeout applies from the next connection.",
+    "",
+    "In read-only mode (readonly on, or -r) only reads reach the vehicle; writes such as clear,",
+    "uds write and OBD service 04 are refused before they are sent.",
     "",
     "Options apply to one command, e.g. 'monitor -i 250 -n 10 0C 0D' or 'read -v 0C'.",
     "",
@@ -253,6 +272,8 @@ common::Status apply_value(const OptionSpec& spec, const common::Span<const char
             break;
         }
         case OptionId::kVerbose:
+        case OptionId::kReadOnly:
+        case OptionId::kYes:
         case OptionId::kHelp:
         case OptionId::kVersion:
             status = fail(error, "option takes no value", span_of(spec.long_name));
@@ -363,6 +384,10 @@ common::Status Parser::apply(const OptionSpec& spec, const common::Span<const ch
     common::Status status{common::Status::kOk};
     if (spec.id == OptionId::kVerbose) {
         options_->verbose = true;
+    } else if (spec.id == OptionId::kReadOnly) {
+        options_->read_only = true;
+    } else if (spec.id == OptionId::kYes) {
+        options_->yes = true;
     } else if (spec.id == OptionId::kHelp) {
         help_ = true;
     } else if (spec.id == OptionId::kVersion) {
@@ -401,10 +426,20 @@ common::Status Parser::check_arguments() noexcept {
         case Command::kPids:
         case Command::kDtc:
         case Command::kVin:
+        case Command::kClear:
         case Command::kDisconnect:
         case Command::kShow:
         case Command::kQuit:
             status = check_count(0U);
+            break;
+        case Command::kCoding:
+            status = check_count(1U);  // Optional: a make to filter by (vag, renault, bmw).
+            break;
+        case Command::kUds:
+            if (none) {
+                status = fail(*error_, "missing uds subcommand, e.g. 'read F190' (try 'uds help')",
+                              common::Span<const char>{});
+            }
             break;
         case Command::kRead:
         case Command::kMonitor:
@@ -467,8 +502,11 @@ bool needs_adapter(const Command command) noexcept {
         case Command::kDtc:
         case Command::kVin:
         case Command::kRaw:
+        case Command::kClear:
             needed = true;
             break;
+        case Command::kUds:     // Connects itself, so 'uds help' works without an adapter.
+        case Command::kCoding:  // Prints a reference catalog; needs no adapter.
         case Command::kShell:
         case Command::kNone:
         case Command::kHelp:
@@ -556,6 +594,14 @@ common::Status apply_setting(const common::Span<const char> name, const common::
             options.verbose = false;
         } else {
             status = fail(error, "invalid value for verbose (on or off)", value);
+        }
+    } else if (spec->id == OptionId::kReadOnly) {
+        if (is_one_of(value, kOnWords)) {
+            options.read_only = true;
+        } else if (is_one_of(value, kOffWords)) {
+            options.read_only = false;
+        } else {
+            status = fail(error, "invalid value for readonly (on or off)", value);
         }
     } else {
         status = apply_value(*spec, value, options, error);

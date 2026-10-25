@@ -279,3 +279,48 @@ TEST_CASE(options_apply_setting) {
     CHECK(!elm327::cli::is_connection_setting(test::span_of("interval")));
     CHECK(!elm327::cli::is_connection_setting(test::span_of("verbose")));
 }
+
+TEST_CASE(options_read_only_and_yes) {
+    const CommandLine plain{{"info"}};
+    REQUIRE(common::is_ok(plain.status));
+    CHECK(!plain.options.read_only);
+    CHECK(!plain.options.yes);
+
+    const CommandLine read_only{{"-r", "read", "0C"}};
+    REQUIRE(common::is_ok(read_only.status));
+    CHECK(read_only.options.read_only);
+    CHECK(read_only.options.command == Command::kRead);
+
+    const CommandLine long_form{{"--read-only", "--yes", "clear"}};
+    REQUIRE(common::is_ok(long_form.status));
+    CHECK(long_form.options.read_only);
+    CHECK(long_form.options.yes);
+    CHECK(long_form.options.command == Command::kClear);
+}
+
+TEST_CASE(options_new_commands) {
+    const CommandLine uds{{"uds", "read", "F190"}};
+    REQUIRE(common::is_ok(uds.status));
+    CHECK(uds.options.command == Command::kUds);
+    CHECK(uds.argument(0U) == "read");
+    CHECK(uds.argument(1U) == "F190");
+
+    const CommandLine coding{{"coding", "vag"}};
+    REQUIRE(common::is_ok(coding.status));
+    CHECK(coding.options.command == Command::kCoding);
+
+    // uds needs a subcommand.
+    CHECK(error_of({"uds"}) == "missing uds subcommand, e.g. 'read F190' (try 'uds help')");
+    // readonly takes no value as an option, but 'set readonly on' is handled in the shell.
+    CHECK(error_of({"--read-only=on", "info"}) == "option takes no value: '--read-only'");
+}
+
+TEST_CASE(options_readonly_setting) {
+    elm327::cli::Options options{};
+    elm327::cli::Line error{};
+    REQUIRE(common::is_ok(elm327::cli::apply_setting(test::span_of("readonly"), test::span_of("on"), options, error)));
+    CHECK(options.read_only);
+    REQUIRE(common::is_ok(elm327::cli::apply_setting(test::span_of("readonly"), test::span_of("off"), options, error)));
+    CHECK(!options.read_only);
+    CHECK(!common::is_ok(elm327::cli::apply_setting(test::span_of("readonly"), test::span_of("maybe"), options, error)));
+}

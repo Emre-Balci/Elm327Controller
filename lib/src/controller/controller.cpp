@@ -167,7 +167,20 @@ common::Status Controller::read_vin(Vin& vin) noexcept {
     return checked(obd_.read_vin(vin), obd_.response());
 }
 
+common::Status Controller::clear_dtcs() noexcept {
+    if (policy_ == AccessPolicy::kReadOnly) {
+        return common::Status::kPermissionDenied;  // A write: refused before anything is sent.
+    }
+    query_last_ = false;
+    return checked(obd_.clear_dtcs(), obd_.response());
+}
+
 common::Status Controller::execute(const std::string_view command, Response& response) noexcept {
+    if (command_blocked(command, policy_)) {
+        // Read-only mode: a command that could change the vehicle is refused before it is sent.
+        response.clear();
+        return common::Status::kPermissionDenied;
+    }
     if (is_at_command(command)) {
         knows_pids_ = false;
     }

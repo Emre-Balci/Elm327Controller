@@ -131,6 +131,25 @@ common::Status ObdClient::read_dtcs(const DtcKind kind, DtcList& dtcs) noexcept 
     return status;
 }
 
+common::Status ObdClient::clear_dtcs() noexcept {
+    const std::array<std::uint8_t, 1U> clear_request{{0x04U}};
+    common::Status status{request_bytes(clear_request, common::Deadline::after(adapter_->timeouts().command))};
+    bool answered{false};
+    bool rejected{false};
+    for (std::size_t index{0U}; is_ok(status) && (index < messages_.size()); ++index) {
+        const Message& message{messages_[index]};
+        if (answers(message, clear_request)) {
+            answered = true;
+        } else {
+            rejected = rejected || rejects(message, clear_request[0U]);
+        }
+    }
+    if (is_ok(status) && (!answered)) {
+        status = rejected ? common::Status::kNotSupported : common::Status::kInvalidArgument;
+    }
+    return status;
+}
+
 common::Status ObdClient::read_vin(Vin& vin) noexcept {
     vin.clear();
     const std::array<std::uint8_t, 2U> vin_request{{0x09U, 0x02U}};

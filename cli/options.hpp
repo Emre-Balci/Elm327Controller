@@ -36,6 +36,9 @@ enum class Command : std::uint8_t {
     kDtc,
     kVin,
     kRaw,
+    kClear,
+    kUds,
+    kCoding,
     // The commands below exist in the shell only.
     kConnect,
     kDisconnect,
@@ -60,6 +63,10 @@ struct Options final {
     std::uint32_t count{0U};
     /// Print the traffic with the adapter.
     bool verbose{false};
+    /// Read-only mode: refuse any command that could change the vehicle (see Controller).
+    bool read_only{false};
+    /// Confirm a write (clear, uds write) without an interactive prompt.
+    bool yes{false};
     /// The arguments of the command, e.g. the PIDs of read. They view the parsed text, which must
     /// outlive the options.
     common::StaticVector<common::Span<const char>, kMaxArguments> arguments{};

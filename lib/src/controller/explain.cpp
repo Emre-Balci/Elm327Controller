@@ -31,6 +31,9 @@ Explanation explain_failure(const common::Status status, const Response& respons
         }
     } else if (status == common::Status::kInvalidArgument) {
         explanation.reason = span_of("unexpected reply");  // A reply that is not OBD data, or malformed.
+    } else if (status == common::Status::kPermissionDenied) {
+        explanation.reason = span_of("refused in read-only mode");
+        explanation.advice = "turn read-only off to write to the vehicle";
     } else {
         explanation.reason = describe(status);
     }
