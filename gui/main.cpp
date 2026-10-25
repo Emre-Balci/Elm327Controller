@@ -7,7 +7,11 @@
 /// that started the program closes the window like its close button, so the serial port is closed
 /// cleanly (see StopSignals).
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 #include <array>
 #include <chrono>
@@ -55,7 +59,11 @@ constexpr std::array<std::string_view, 25U> kUsage{{
     "and a terminal for AT commands. The options fill in the connection bar.",
     "",
     "Options:",
+#if defined(_WIN32)
+    "  -d, --device PATH     serial device (default COM3)",
+#else
     "  -d, --device PATH     serial device (default /dev/ttyUSB0)",
+#endif
     "  -b, --baud RATE       bit rate (default 38400)",
     "  -p, --protocol N      OBD protocol 0-9 or A-C (default 0: automatic)",
     "  -t, --timeout MS      reply timeout of a command in ms (default 5000)",
@@ -66,13 +74,21 @@ constexpr std::array<std::string_view, 25U> kUsage{{
     "  -r, --read-only       safe mode: refuse anything that could change the vehicle",
     "      --tab NAME        open the tab live, codes, vehicle, features, terminal or expert",
     "      --features FILE   the definitions of the Features tab (default: features.ini in",
+#if defined(_WIN32)
+    "                        %APPDATA%\\elm327controller)",
+#else
     "                        ~/.config/elm327controller)",
+#endif
     "      --screenshot FILE save the window as a PPM image once it is idle, then exit",
     "  -h, --help            show this help",
     "      --version         show the version",
     "",
     "Without an adapter, run elm327sim and use the device it prints, e.g.",
+#if defined(_WIN32)
+    "  elm327gui -d \\\\.\\pipe\\elm327sim-1234-0 --monitor 0C,0D   (or --connect --widgets)",
+#else
     "  elm327gui -d /dev/pts/5 --monitor 0C,0D       (or --connect --widgets)",
+#endif
     "Ctrl+C in this terminal closes the window.",
 }};
 
@@ -80,8 +96,13 @@ constexpr std::array<std::string_view, 25U> kUsage{{
 constexpr float kWindowWidth{1280.0F};
 constexpr float kWindowHeight{800.0F};
 
+#if defined(_WIN32)
+/// A font that looks better than ImGui's built-in one: Segoe UI, the font of Windows itself.
+constexpr const char* kFontPath{"C:\\Windows\\Fonts\\segoeui.ttf"};
+#else
 /// A font that looks better than ImGui's built-in one, when it is installed (fonts-dejavu-core).
 constexpr const char* kFontPath{"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"};
+#endif
 constexpr float kFontSize{15.0F};
 
 /// Frames per second while the worker is busy or monitoring; otherwise the window only redraws on
@@ -111,21 +132,53 @@ common::Span<const char> span_of(const std::string_view text) noexcept {
     return common::Span<const char>{text.data(), text.size()};
 }
 
+#if defined(_WIN32)
+common::NativeHandle standard_output() noexcept {
+    return ::GetStdHandle(STD_OUTPUT_HANDLE);
+}
+
+common::NativeHandle standard_error() noexcept {
+    return ::GetStdHandle(STD_ERROR_HANDLE);
+}
+
 /// Writes @p text to @p descriptor, e.g. stderr. Output is best effort.
-void write_text(const std::int32_t descriptor, const std::string_view text) noexcept {
+void write_text(const common::NativeHandle descriptor, const std::string_view text) noexcept {
+    DWORD written{0U};
+    static_cast<void>(::WriteFile(descriptor, text.data(), static_cast<DWORD>(text.size()), &written, nullptr));
+}
+#else
+common::NativeHandle standard_output() noexcept {
+    return STDOUT_FILENO;
+}
+
+common::NativeHandle standard_error() noexcept {
+    return STDERR_FILENO;
+}
+
+/// Writes @p text to @p descriptor, e.g. stderr. Output is best effort.
+void write_text(const common::NativeHandle descriptor, const std::string_view text) noexcept {
     const ssize_t written{::write(descriptor, text.data(), text.size())};
     static_cast<void>(written);
 }
+#endif
+
+/// @return true if the file @p path can be opened for reading.
+bool readable(const char* const path) noexcept {
+    common::File file{};
+    const bool opened{is_ok(file.open(path, common::FileOptions{}))};  // Read-only.
+    static_cast<void>(file.close());
+    return opened;
+}
 
 void print_error(const std::string_view reason, const std::string_view subject) noexcept {
-    write_text(STDERR_FILENO, "elm327gui: ");
-    write_text(STDERR_FILENO, reason);
+    write_text(standard_error(), "elm327gui: ");
+    write_text(standard_error(), reason);
     if (!subject.empty()) {
-        write_text(STDERR_FILENO, ": '");
-        write_text(STDERR_FILENO, subject);
-        write_text(STDERR_FILENO, "'");
+        write_text(standard_error(), ": '");
+        write_text(standard_error(), subject);
+        write_text(standard_error(), "'");
     }
-    write_text(STDERR_FILENO, "\nTry 'elm327gui --help' for more information.\n");
+    write_text(standard_error(), "\nTry 'elm327gui --help' for more information.\n");
 }
 
 bool parse_milliseconds(const std::string_view text, common::Duration& duration) noexcept {
@@ -269,9 +322,9 @@ bool parse_arguments(const common::Span<const char* const> args, Arguments& argu
 
 void report_glfw_error(const int code, const char* const description) {
     static_cast<void>(code);
-    write_text(STDERR_FILENO, "elm327gui: GLFW: ");
-    write_text(STDERR_FILENO, (description != nullptr) ? std::string_view{description} : std::string_view{});
-    write_text(STDERR_FILENO, "\n");
+    write_text(standard_error(), "elm327gui: GLFW: ");
+    write_text(standard_error(), (description != nullptr) ? std::string_view{description} : std::string_view{});
+    write_text(standard_error(), "\n");
 }
 
 /// Wakes up the main loop: called by the worker's thread when it has published something.
@@ -336,7 +389,8 @@ void load_definitions(const Arguments& arguments, elm327::gui::App& app) noexcep
     if (arguments.features != nullptr) {
         static_cast<void>(path.append(std::string_view{arguments.features}));
     } else if (have_directory) {
-        static_cast<void>(path.append(directory.text()) && path.append("/features.ini"));
+        static_cast<void>(path.append(directory.text()) && path.append(elm327::gui::kPathSeparator) &&
+                          path.append("features.ini"));
     } else {
         // Without a home directory there is no file to look for.
     }
@@ -359,9 +413,9 @@ void load_definitions(const Arguments& arguments, elm327::gui::App& app) noexcep
             } else {
                 static_cast<void>(problem.append(std::string_view{common::to_string(status)}));
             }
-            write_text(STDERR_FILENO, "elm327gui: ");
-            write_text(STDERR_FILENO, problem.view());
-            write_text(STDERR_FILENO, "\n");
+            write_text(standard_error(), "elm327gui: ");
+            write_text(standard_error(), problem.view());
+            write_text(standard_error(), "\n");
         }
     }
     app.set_features(features, source.view(), problem.view(),
@@ -398,7 +452,7 @@ std::int32_t run_window(const Arguments& arguments, elm327::StopSignals& stop) n
             style.ScaleAllSizes(scale);
             style.FontScaleDpi = scale;
             style.FrameRounding = 3.0F;
-            if (::access(kFontPath, R_OK) == 0) {
+            if (readable(kFontPath)) {
                 static_cast<void>(io.Fonts->AddFontFromFileTTF(kFontPath, kFontSize));
             }
             static_cast<void>(ImGui_ImplGlfw_InitForOpenGL(window, true));
@@ -449,18 +503,24 @@ std::int32_t run_window(const Arguments& arguments, elm327::StopSignals& stop) n
                 // Before GLFW goes away: the worker calls glfwPostEmptyEvent().
                 worker.stop();
             } else {
-                write_text(STDERR_FILENO, "elm327gui: cannot start the worker thread\n");
+                write_text(standard_error(), "elm327gui: cannot start the worker thread\n");
             }
             ImGui_ImplOpenGL3_Shutdown();
             ImGui_ImplGlfw_Shutdown();
             ImGui::DestroyContext();
             glfwDestroyWindow(window);
         } else {
-            write_text(STDERR_FILENO, "elm327gui: cannot open a window (is there a display? DISPLAY or WAYLAND_DISPLAY)\n");
+#if defined(_WIN32)
+            write_text(standard_error(),
+                       "elm327gui: cannot open a window (does the graphics driver offer OpenGL 3?)\n");
+#else
+            write_text(standard_error(),
+                       "elm327gui: cannot open a window (is there a display? DISPLAY or WAYLAND_DISPLAY)\n");
+#endif
         }
         glfwTerminate();
     } else {
-        write_text(STDERR_FILENO, "elm327gui: cannot initialize GLFW (is there a display?)\n");
+        write_text(standard_error(), "elm327gui: cannot initialize GLFW (is there a display?)\n");
     }
     return exit_code;
 }
@@ -477,13 +537,13 @@ int main(const int argc, const char* const argv[]) {
         exit_code = kExitUsage;
     } else if (arguments.help) {
         for (const std::string_view line : kUsage) {
-            write_text(STDOUT_FILENO, line);
-            write_text(STDOUT_FILENO, "\n");
+            write_text(standard_output(), line);
+            write_text(standard_output(), "\n");
         }
     } else if (arguments.version) {
-        write_text(STDOUT_FILENO, "elm327gui ");
-        write_text(STDOUT_FILENO, elm327::kVersion);
-        write_text(STDOUT_FILENO, "\n");
+        write_text(standard_output(), "elm327gui ");
+        write_text(standard_output(), elm327::kVersion);
+        write_text(standard_output(), "\n");
     } else {
         exit_code = run_window(arguments, stop);
         const std::int32_t signal{stop.received()};

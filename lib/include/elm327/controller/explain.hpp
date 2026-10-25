@@ -34,7 +34,7 @@ struct Explanation final {
 [[nodiscard]] Explanation explain_failure(common::Status status, const Response& response) noexcept;
 
 /// Explains why opening the device failed with @p status (ConnectFailure::kOpen), e.g. "no such
-/// device", or "permission denied" with the advice to join the dialout group.
+/// device", or "permission denied" with the advice to join the dialout group (Linux).
 [[nodiscard]] Explanation explain_open_failure(common::Status status) noexcept;
 
 /// Explains why Controller::connect() failed with @p status at the step @p failure (see

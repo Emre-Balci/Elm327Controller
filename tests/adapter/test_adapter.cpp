@@ -43,8 +43,12 @@ TEST_CASE(adapter_closed) {
     elm327::Adapter adapter{};
     elm327::Response response{};
     CHECK(!adapter.is_open());
-    CHECK(adapter.open("/nonexistent/ttyUSB9", elm327::AdapterOptions{}) == common::Status::kNotFound);
-    CHECK(adapter.open("/dev/null", elm327::AdapterOptions{}) == common::Status::kInvalidArgument);
+    CHECK(adapter.open(test::kMissingDevice, elm327::AdapterOptions{}) == common::Status::kNotFound);
+    CHECK(adapter.open(test::kNotSerialDevice, elm327::AdapterOptions{}) == common::Status::kInvalidArgument);
+#if defined(_WIN32)
+    // A named pipe, as elm327sim offers one there, that does not exist.
+    CHECK(adapter.open("\\\\.\\pipe\\elm327-missing", elm327::AdapterOptions{}) == common::Status::kNotFound);
+#endif
     CHECK(adapter.execute("ATI", response) == common::Status::kInvalidArgument);
     CHECK(adapter.initialize('0') == common::Status::kInvalidArgument);
     CHECK(common::is_ok(adapter.close()));
@@ -184,7 +188,7 @@ TEST_CASE(adapter_cancel) {
     elm327::Adapter adapter{};
     REQUIRE(open(adapter, fake));
     test::Event event{};
-    REQUIRE(event.descriptor() >= 0);
+    REQUIRE(event.valid());
     adapter.set_cancel_descriptor(event.descriptor());
     elm327::Response response{};
 
@@ -215,7 +219,7 @@ TEST_CASE(adapter_settles_after_an_interruption) {
         REQUIRE(open(adapter, fake));
         REQUIRE(common::is_ok(adapter.initialize('0')));
         test::Event event{};
-        REQUIRE(event.descriptor() >= 0);
+        REQUIRE(event.valid());
         adapter.set_cancel_descriptor(event.descriptor());
         elm327::Response response{};
         std::thread canceller{[&event]() {

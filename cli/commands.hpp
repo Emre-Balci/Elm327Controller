@@ -9,6 +9,7 @@
 #include "cli/console.hpp"
 #include "cli/options.hpp"
 #include "common/containers/span.hpp"
+#include "common/core/config.hpp"
 #include "common/core/status.hpp"
 #include "elm327/adapter/response.hpp"
 #include "elm327/controller/controller.hpp"
@@ -41,7 +42,7 @@ enum class Style : std::uint8_t {
 /// The object embeds a Controller (about 25 KiB) and never allocates. Not thread-safe.
 class Session final {
 public:
-    Session(Console& out, Console& err, std::int32_t cancel_descriptor, Style style) noexcept;
+    Session(Console& out, Console& err, common::NativeHandle cancel_descriptor, Style style) noexcept;
 
     /// Runs the command of @p options: one for which needs_adapter() is true, kConnect or
     /// kDisconnect. A command that needs the adapter connects to it first, with
@@ -96,7 +97,7 @@ private:
 
     Console* out_;
     Console* err_;
-    std::int32_t cancel_descriptor_;
+    common::NativeHandle cancel_descriptor_;
     Style style_;
     const Options* options_{nullptr};  ///< The options of the running command.
     Controller controller_{};
@@ -107,10 +108,11 @@ private:
 /// over a connection that is closed again afterwards; without a command, runs the interactive
 /// shell, which reads its commands from @p input (see run_shell()). Results go to @p out; errors,
 /// and the traffic with --verbose, go to @p err. Once @p cancel_descriptor is readable (see
-/// StopSignals; -1 for none), the command stops at the next opportunity and the port is closed.
+/// StopSignals; kInvalidNativeHandle for none), the command stops at the next opportunity and the
+/// port is closed.
 /// @return the exit code.
-[[nodiscard]] std::int32_t run(common::Span<const char* const> args, std::int32_t input, Console& out, Console& err,
-                               std::int32_t cancel_descriptor) noexcept;
+[[nodiscard]] std::int32_t run(common::Span<const char* const> args, common::NativeHandle input, Console& out,
+                               Console& err, common::NativeHandle cancel_descriptor) noexcept;
 
 }  // namespace cli
 }  // namespace elm327

@@ -1,7 +1,3 @@
-#include <sys/mman.h>
-#include <unistd.h>
-
-#include <array>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -11,6 +7,7 @@
 #include "cli/commands.hpp"
 #include "cli/console.hpp"
 #include "common/containers/span.hpp"
+#include "common/core/config.hpp"
 #include "elm327/version.hpp"
 #include "sim/fake_elm327.hpp"
 #include "test_framework.hpp"
@@ -27,37 +24,25 @@ struct Outcome final {
     std::string err{};
 };
 
-std::string read_back(const int descriptor) {
-    std::string text{};
-    static_cast<void>(::lseek(descriptor, 0, SEEK_SET));
-    std::array<char, 4096U> buffer{};
-    for (ssize_t count{::read(descriptor, buffer.data(), buffer.size())}; count > 0;
-         count = ::read(descriptor, buffer.data(), buffer.size())) {
-        text.append(buffer.data(), static_cast<std::size_t>(count));
-    }
-    return text;
-}
-
-/// Runs elm327ctl with @p arguments in-process, capturing its output in memory files.
-Outcome run_cli(std::vector<std::string> arguments, const int cancel_descriptor = -1) {
+/// Runs elm327ctl with @p arguments in-process, capturing its output.
+Outcome run_cli(std::vector<std::string> arguments,
+                const common::NativeHandle cancel_descriptor = common::kInvalidNativeHandle) {
     arguments.insert(arguments.begin(), "elm327ctl");
     std::vector<const char*> pointers{};
     for (const std::string& argument : arguments) {
         pointers.push_back(argument.c_str());
     }
-    const int out_descriptor{::memfd_create("out", MFD_CLOEXEC)};
-    const int err_descriptor{::memfd_create("err", MFD_CLOEXEC)};
+    const test::Capture out_capture{};
+    const test::Capture err_capture{};
     Outcome outcome{};
-    if ((out_descriptor >= 0) && (err_descriptor >= 0)) {
-        elm327::cli::Console out{out_descriptor};
-        elm327::cli::Console err{err_descriptor};
-        outcome.exit_code = elm327::cli::run(common::Span<const char* const>{pointers.data(), pointers.size()}, -1,
-                                             out, err, cancel_descriptor);
-        outcome.out = read_back(out_descriptor);
-        outcome.err = read_back(err_descriptor);
+    if (out_capture.valid() && err_capture.valid()) {
+        elm327::cli::Console out{out_capture.descriptor()};
+        elm327::cli::Console err{err_capture.descriptor()};
+        outcome.exit_code = elm327::cli::run(common::Span<const char* const>{pointers.data(), pointers.size()},
+                                             common::kInvalidNativeHandle, out, err, cancel_descriptor);
+        outcome.out = out_capture.text();
+        outcome.err = err_capture.text();
     }
-    static_cast<void>(::close(out_descriptor));
-    static_cast<void>(::close(err_descriptor));
     return outcome;
 }
 
@@ -87,14 +72,16 @@ TEST_CASE(cli_help_version_and_usage_errors) {
 }
 
 TEST_CASE(cli_device_errors) {
-    const Outcome missing{run_cli({"-d", "/nonexistent/ttyUSB9", "info"})};
+    const std::string missing_device{test::kMissingDevice};
+    const Outcome missing{run_cli({"-d", missing_device, "info"})};
     CHECK(missing.exit_code == elm327::cli::kExitFailure);
     CHECK(missing.err ==
-          "elm327ctl: /nonexistent/ttyUSB9: no such device (choose the adapter's serial device with -d)\n");
+          "elm327ctl: " + missing_device + ": no such device (choose the adapter's serial device with -d)\n");
 
-    const Outcome not_serial{run_cli({"-d", "/dev/null", "info"})};
+    const std::string not_serial_device{test::kNotSerialDevice};
+    const Outcome not_serial{run_cli({"-d", not_serial_device, "info"})};
     CHECK(not_serial.exit_code == elm327::cli::kExitFailure);
-    CHECK(not_serial.err == "elm327ctl: /dev/null: not a serial device\n");
+    CHECK(not_serial.err == "elm327ctl: " + not_serial_device + ": not a serial device\n");
 }
 
 TEST_CASE(cli_info) {
@@ -244,7 +231,7 @@ TEST_CASE(cli_monitor_stops_when_cancelled) {
     elm327::sim::FakeElm327 fake{};
     REQUIRE(fake.valid());
     test::Event event{};
-    REQUIRE(event.descriptor() >= 0);
+    REQUIRE(event.valid());
     std::thread canceller{[&event]() {
         std::this_thread::sleep_for(300ms);
         event.signal();
@@ -268,7 +255,7 @@ TEST_CASE(cli_interrupted_while_connecting) {
     elm327::sim::FakeElm327 fake{elm327::sim::example_vehicle(), behaviour};
     REQUIRE(fake.valid());
     test::Event event{};
-    REQUIRE(event.descriptor() >= 0);
+    REQUIRE(event.valid());
     std::thread canceller{[&event]() {
         std::this_thread::sleep_for(200ms);
         event.signal();
@@ -338,7 +325,7 @@ TEST_CASE(cli_uds_write_refused_in_read_only) {
 }
 
 TEST_CASE(cli_uds_help) {
-    const Outcome outcome{run_cli({"-d", "/dev/null", "uds", "help"})};
+    const Outcome outcome{run_cli({"-d", test::kNotSerialDevice, "uds", "help"})};
     CHECK(outcome.exit_code == elm327::cli::kExitSuccess);  // 'help' needs no adapter.
     CHECK(contains(outcome.out, "uds read DID"));
     CHECK(contains(outcome.out, "refused there before anything is sent"));

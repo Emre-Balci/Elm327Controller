@@ -118,7 +118,7 @@ std::uint8_t pid_argument(const Options& options, const std::size_t index) noexc
 
 }  // namespace
 
-Session::Session(Console& out, Console& err, const std::int32_t cancel_descriptor, const Style style) noexcept
+Session::Session(Console& out, Console& err, const common::NativeHandle cancel_descriptor, const Style style) noexcept
     : out_{&out}, err_{&err}, cancel_descriptor_{cancel_descriptor}, style_{style} {
     controller_.set_cancel_descriptor(cancel_descriptor);
 }
@@ -932,8 +932,8 @@ void Session::print_field(const std::string_view label, const common::Span<const
     out_->print(Line{}.text(label).pad(kLabelWidth).text(value));
 }
 
-std::int32_t run(const common::Span<const char* const> args, const std::int32_t input, Console& out, Console& err,
-                 const std::int32_t cancel_descriptor) noexcept {
+std::int32_t run(const common::Span<const char* const> args, const common::NativeHandle input, Console& out,
+                 Console& err, const common::NativeHandle cancel_descriptor) noexcept {
     Options options{};
     Line error{};
     std::int32_t exit_code{kExitSuccess};

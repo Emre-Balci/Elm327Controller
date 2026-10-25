@@ -1,8 +1,14 @@
 #include "gui/features.hpp"
 
+#if defined(_WIN32)
+// The shell's header (with the known folders) needs <windows.h> first.
+#include <windows.h>
+
+#include <shlobj.h>
+#else
 #include <pwd.h>
-#include <sys/stat.h>
 #include <unistd.h>
+#endif
 
 #include <array>
 #include <cstddef>
@@ -81,15 +87,31 @@ on       = 05
 off      = 03
 )"};
 
+#if defined(_WIN32)
+/// In the user's roaming application data, e.g. C:\Users\<name>\AppData\Roaming.
+constexpr std::string_view kDirectoryName{"\\elm327controller"};
+constexpr std::string_view kBackupFile{"\\backups.txt"};
+#else
 constexpr std::string_view kDirectoryName{"/.config/elm327controller"};
 constexpr std::string_view kBackupFile{"/backups.txt"};
 
-/// Permissions: the user's own (octal 0700 for a directory, 0600 for the backups).
-constexpr mode_t kDirectoryMode{0x1C0U};
-constexpr std::uint32_t kBackupMode{0x180U};
-
 /// Room for the strings of a password database entry.
 constexpr std::size_t kPasswordBuffer{4096U};
+#endif
+
+/// Permissions: the user's own (octal 0700 for a directory, 0600 for the backups). Windows has no
+/// permission bits: there the files inherit the security of the user's profile.
+constexpr std::uint32_t kDirectoryMode{0x1C0U};
+constexpr std::uint32_t kBackupMode{0x180U};
+
+/// @return true for a separator of the parts of a path: a slash, and on Windows also a backslash.
+bool is_separator(const char character) noexcept {
+#if defined(_WIN32)
+    return (character == '/') || (character == '\\');
+#else
+    return character == '/';
+#endif
+}
 
 /// Creates @p directory and the directories above it that are missing, like "mkdir -p". Best
 /// effort: opening a file in it tells whether it worked.
@@ -97,9 +119,10 @@ void make_directories(const common::Span<const char> directory) noexcept {
     Path prefix{};
     for (std::size_t index{0U}; index < directory.size(); ++index) {
         static_cast<void>(prefix.append(directory[index]));
-        const bool component_end{((index + 1U) == directory.size()) || (directory[index + 1U] == '/')};
+        const bool component_end{((index + 1U) == directory.size()) || is_separator(directory[index + 1U])};
         if (component_end && (index > 0U)) {
-            static_cast<void>(::mkdir(prefix.c_str(), kDirectoryMode));  // Fails when it exists: fine.
+            // Fails when it exists, and for a drive such as "C:": fine.
+            static_cast<void>(common::create_directory(prefix.c_str(), kDirectoryMode));
         }
     }
 }
@@ -116,6 +139,29 @@ std::string_view simulator_features() noexcept {
     return kSimulatorFeatures;
 }
 
+#if defined(_WIN32)
+common::Status config_directory(Path& directory) noexcept {
+    directory.clear();
+    // The known folder, not the environment variable APPDATA. The shell allocates the path.
+    PWSTR folder{nullptr};
+    common::Status status{(::SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0U, nullptr, &folder) == S_OK)
+                              ? common::Status::kOk
+                              : common::Status::kNotFound};
+    std::array<char, Path::capacity() + 1U> utf8{};
+    if (is_ok(status)) {
+        // The wide-character path in UTF-8, the encoding of the paths Common takes; 0 if it does not fit.
+        const int length{::WideCharToMultiByte(CP_UTF8, 0U, folder, -1, utf8.data(), static_cast<int>(utf8.size()),
+                                               nullptr, nullptr)};
+        status = (length > 0) ? common::Status::kOk : common::Status::kOutOfRange;
+    }
+    ::CoTaskMemFree(folder);  // Also when the call failed.
+    if (is_ok(status)) {
+        const bool fits{directory.append(std::string_view{utf8.data()}) && directory.append(kDirectoryName)};
+        status = fits ? common::Status::kOk : common::Status::kOutOfRange;
+    }
+    return status;
+}
+#else
 common::Status config_directory(Path& directory) noexcept {
     directory.clear();
     passwd entry{};
@@ -131,6 +177,7 @@ common::Status config_directory(Path& directory) noexcept {
     }
     return status;
 }
+#endif
 
 common::Status load_features(const char* const path, const common::Span<std::uint8_t> buffer,
                              expert::FeatureList& features, expert::FeatureParseError& error) noexcept {

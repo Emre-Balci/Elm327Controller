@@ -49,7 +49,9 @@ Explanation explain_open_failure(const common::Status status) noexcept {
             break;
         case common::Status::kPermissionDenied:
             explanation.reason = span_of("permission denied");
-            explanation.advice = "add your user to the dialout group";
+#if !defined(_WIN32)
+            explanation.advice = "add your user to the dialout group";  // Windows has no such group.
+#endif
             break;
         case common::Status::kResourceLimit:
             explanation.reason = span_of("in use by another program");

@@ -1,11 +1,7 @@
 #include "elm327/adapter/adapter.hpp"
 
-#include <poll.h>
-#include <time.h>
-
 #include <array>
 #include <chrono>
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -64,14 +60,6 @@ common::ByteSet ignored_bytes() noexcept {
     return common::ByteSet{}.with('\n').with('\0');
 }
 
-timespec to_relative_timespec(const common::Duration duration) noexcept {
-    const std::int64_t ns{duration.count()};
-    timespec ts{};
-    ts.tv_sec = ns / common::MonotonicClock::kNanosPerSecond;
-    ts.tv_nsec = ns % common::MonotonicClock::kNanosPerSecond;
-    return ts;
-}
-
 common::Span<const char> span_of(const std::string_view text) noexcept {
     return common::Span<const char>{text.data(), text.size()};
 }
@@ -105,8 +93,12 @@ std::string_view protocols() noexcept {
 
 Adapter::Adapter() noexcept : framer_{line_delimiters(), ignored_bytes()} {}
 
+Adapter::~Adapter() {
+    static_cast<void>(close_device());
+}
+
 common::Status Adapter::open(const char* const path, const AdapterOptions& options) noexcept {
-    const common::Status status{port_.open(path, options.serial)};
+    const common::Status status{open_device(path, options.serial)};
     if (is_ok(status)) {
         timeouts_ = options.timeouts;
         identity_.clear();
@@ -118,13 +110,13 @@ common::Status Adapter::open(const char* const path, const AdapterOptions& optio
 common::Status Adapter::close() noexcept {
     identity_.clear();
     unsettled_ = false;
-    return port_.close();
+    return close_device();
 }
 
 common::Status Adapter::execute(const std::string_view command, Response& response,
                                 const common::Deadline& deadline) noexcept {
     response.clear();
-    common::Status status{port_.is_open() ? common::Status::kOk : common::Status::kInvalidArgument};
+    common::Status status{is_open() ? common::Status::kOk : common::Status::kInvalidArgument};
     common::StaticString<kMaxCommandLength + 1U> line{};
     if (is_ok(status)) {
         const bool valid{(!command.empty()) && (command.find('\r') == std::string_view::npos) &&
@@ -137,12 +129,12 @@ common::Status Adapter::execute(const std::string_view command, Response& respon
     }
     if (is_ok(status)) {
         // Late output of an earlier command, e.g. one that timed out, would be taken for the reply.
-        status = port_.discard_input();
+        status = discard_input();
     }
     if (is_ok(status)) {
         framer_.reset();
         trace(TraceEvent::kCommand, span_of(command));
-        status = port_.write_all(line.bytes(), deadline);
+        status = write_all(line.bytes(), deadline);
         // From here on the adapter works on the command: without its prompt, the next command
         // has to settle first.
         unsettled_ = true;
@@ -185,18 +177,13 @@ common::Status Adapter::read_reply(const std::string_view command, Response& res
     bool prompt{false};
     bool first_line{true};
     for (std::size_t round{0U}; is_ok(status) && (!prompt) && (round < kMaxReads); ++round) {
-        status = wait_for_input(deadline);
-        if (is_ok(status)) {
-            // The port is ready, so an expired deadline still takes what has arrived.
-            const common::Result<std::size_t> received{port_.read(buffer, common::Deadline{})};
-            if (received.has_value()) {
-                prompt = consume(command, common::Span<const std::uint8_t>{buffer.data(), received.value()}, response,
-                                 first_line);
-            } else if (received.status() != common::Status::kTimeout) {
-                status = received.status();
-            } else {
-                // A wake-up without data: wait again.
-            }
+        // A wake-up without data reads nothing, and the next round waits again.
+        const common::Result<std::size_t> received{receive(buffer, deadline)};
+        if (received.has_value()) {
+            prompt = consume(command, common::Span<const std::uint8_t>{buffer.data(), received.value()}, response,
+                             first_line);
+        } else {
+            status = received.status();
         }
     }
     if (is_ok(status) && (!prompt)) {
@@ -216,7 +203,7 @@ common::Status Adapter::settle(Response& scratch, const common::Deadline& deadli
         // "STOPPED" and its prompt, or, if it finished meanwhile, ignores the space.
         common::StaticString<1U> stop{};
         static_cast<void>(stop.append(kStopCharacter));  // Cannot fail: one character.
-        status = port_.write_all(stop.bytes(), deadline);
+        status = write_all(stop.bytes(), deadline);
         if (is_ok(status)) {
             framer_.reset();
             status = read_reply(std::string_view{}, scratch, deadline);
@@ -248,33 +235,6 @@ bool Adapter::consume(const std::string_view command, const common::Span<const s
         }
     }
     return prompt;
-}
-
-common::Status Adapter::wait_for_input(const common::Deadline& deadline) const noexcept {
-    std::array<pollfd, 2U> entries{};
-    entries[0U].fd = port_.descriptor();
-    entries[0U].events = POLLIN;
-    entries[1U].fd = cancel_descriptor_;  // poll() skips a negative descriptor.
-    entries[1U].events = POLLIN;
-    timespec timeout{};
-    const timespec* timeout_pointer{nullptr};
-    if (!deadline.is_never()) {
-        timeout = to_relative_timespec(deadline.remaining());
-        timeout_pointer = &timeout;
-    }
-    const int ready{::ppoll(entries.data(), entries.size(), timeout_pointer, nullptr)};
-    common::Status status{common::Status::kTimeout};
-    if (ready < 0) {
-        // After a signal handler ran, the read finds no data and the caller waits again.
-        status = (errno == EINTR) ? common::Status::kOk : common::Status::kSystemError;
-    } else if (ready == 0) {
-        status = common::Status::kTimeout;
-    } else if (static_cast<std::uint32_t>(entries[1U].revents) != 0U) {
-        status = common::Status::kInterrupted;
-    } else {
-        status = common::Status::kOk;  // Input, a hang-up or an error: the read tells which.
-    }
-    return status;
 }
 
 common::Status Adapter::reset() noexcept {

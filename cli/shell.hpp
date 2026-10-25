@@ -7,7 +7,8 @@
 /// connects, and 'set' changes the settings of the next connection.
 ///
 /// Ctrl+C stops the command that runs and returns to the prompt; at the prompt it discards the
-/// line. SIGTERM, SIGHUP and SIGPIPE end the shell, as does 'quit', Ctrl+D or the end of the input.
+/// line. SIGTERM, SIGHUP and SIGPIPE end the shell (on Windows, Ctrl+Break and closing the console
+/// window), as does 'quit', Ctrl+D or the end of the input.
 
 #ifndef ELM327_CLI_SHELL_HPP
 #define ELM327_CLI_SHELL_HPP
@@ -16,18 +17,20 @@
 
 #include "cli/console.hpp"
 #include "cli/options.hpp"
+#include "common/core/config.hpp"
 
 namespace elm327 {
 namespace cli {
 
 /// Runs the shell with the settings of @p options (the options of the command line), reading its
 /// commands from @p input. Results go to @p out, errors and notices to @p err. @p cancel_descriptor
-/// is the descriptor of a StopSignals, or an eventfd (-1 for none): once it is readable, the
-/// running command stops, and the shell takes the request and goes on.
+/// is the descriptor of a StopSignals, or an eventfd (on Windows, a manual-reset event;
+/// kInvalidNativeHandle for none): once it is readable, the running command stops, and the shell
+/// takes the request and goes on.
 /// @return the exit code of the last command (0 if there was none); 128 + the signal number when a
 ///         signal ended the shell.
-[[nodiscard]] std::int32_t run_shell(const Options& options, std::int32_t input, Console& out, Console& err,
-                                     std::int32_t cancel_descriptor) noexcept;
+[[nodiscard]] std::int32_t run_shell(const Options& options, common::NativeHandle input, Console& out, Console& err,
+                                     common::NativeHandle cancel_descriptor) noexcept;
 
 }  // namespace cli
 }  // namespace elm327

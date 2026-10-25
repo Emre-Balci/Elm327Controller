@@ -61,7 +61,7 @@ TEST_CASE(options_defaults) {
     const CommandLine line{{"info"}};
     REQUIRE(common::is_ok(line.status));
     CHECK(line.options.command == Command::kInfo);
-    CHECK(line.options.connection.device.view() == "/dev/ttyUSB0");
+    CHECK(line.options.connection.device.view() == elm327::kDefaultDevice);
     CHECK(line.options.connection.baud_rate == common::BaudRate::k38400);
     CHECK(line.options.connection.protocol == '0');
     CHECK(line.options.connection.timeouts.command == 5s);

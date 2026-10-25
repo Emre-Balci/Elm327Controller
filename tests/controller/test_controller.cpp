@@ -59,7 +59,7 @@ std::string reason_of(const elm327::Explanation& explanation) {
 
 TEST_CASE(controller_settings_and_protocols) {
     const elm327::ConnectionSettings settings{};
-    CHECK(settings.device.view() == "/dev/ttyUSB0");
+    CHECK(settings.device.view() == elm327::kDefaultDevice);
     CHECK(settings.baud_rate == common::BaudRate::k38400);
     CHECK(settings.protocol == '0');
 
@@ -176,14 +176,14 @@ TEST_CASE(controller_reads_the_supported_pids_once) {
 TEST_CASE(controller_connect_failures) {
     elm327::Controller controller{};
     elm327::ConnectionSettings settings{};
-    REQUIRE(settings.device.assign("/nonexistent/ttyUSB9"));
+    REQUIRE(settings.device.assign(test::kMissingDevice));
     CHECK(controller.connect(settings) == common::Status::kNotFound);
     CHECK(controller.connect_failure() == elm327::ConnectFailure::kOpen);
     CHECK(!controller.connected());
     CHECK(reason_of(elm327::explain_connect_failure(controller.connect_failure(), common::Status::kNotFound)) ==
           "no such device (choose the adapter's serial device)");
 
-    REQUIRE(settings.device.assign("/dev/null"));
+    REQUIRE(settings.device.assign(test::kNotSerialDevice));
     CHECK(controller.connect(settings) == common::Status::kInvalidArgument);
     CHECK(reason_of(elm327::explain_open_failure(common::Status::kInvalidArgument)) == "not a serial device");
 
@@ -232,8 +232,12 @@ TEST_CASE(controller_explanations) {
     CHECK(reason_of(elm327::explain_failure(common::Status::kInvalidArgument, none)) == "unexpected reply");
     const elm327::Response bus{test::make_response({"SEARCHING...", "CAN ERROR"})};
     CHECK(reason_of(elm327::explain_failure(common::Status::kSystemError, bus)) == "CAN ERROR");
+#if defined(_WIN32)
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kPermissionDenied)) == "permission denied");
+#else
     CHECK(reason_of(elm327::explain_open_failure(common::Status::kPermissionDenied)) ==
           "permission denied (add your user to the dialout group)");
+#endif
     CHECK(reason_of(elm327::explain_open_failure(common::Status::kResourceLimit)) == "in use by another program");
     CHECK(reason_of(elm327::explain_open_failure(common::Status::kNotSupported)) ==
           "the device does not accept the line settings");
@@ -266,10 +270,10 @@ TEST_CASE(timing_next_activation_and_wait) {
     CHECK(elm327::next_activation(start, 100ms, start + 400ms) == (start + 500ms));
 
     const common::TimePoint before{common::MonotonicClock::now()};
-    CHECK(common::is_ok(elm327::wait_until(-1, common::Deadline::after(30ms))));
+    CHECK(common::is_ok(elm327::wait_until(common::kInvalidNativeHandle, common::Deadline::after(30ms))));
     CHECK((common::MonotonicClock::now() - before) >= 30ms);
     test::Event event{};
-    REQUIRE(event.descriptor() >= 0);
+    REQUIRE(event.valid());
     CHECK(common::is_ok(elm327::wait_until(event.descriptor(), common::Deadline::after(10ms))));
     event.signal();
     CHECK(elm327::wait_until(event.descriptor(), common::Deadline::after(5s)) == common::Status::kInterrupted);
@@ -277,20 +281,41 @@ TEST_CASE(timing_next_activation_and_wait) {
 
 TEST_CASE(signals_take_stop_requests) {
     test::Event event{};
-    REQUIRE(event.descriptor() >= 0);
+    REQUIRE(event.valid());
     CHECK(elm327::take_stop_request(event.descriptor()) == 0);
     event.signal();
     event.signal();
     CHECK(elm327::take_stop_request(event.descriptor()) == SIGINT);
     CHECK(elm327::take_stop_request(event.descriptor()) == 0);  // Taken.
     CHECK(elm327::wait_until(event.descriptor(), common::Deadline::after(1ms)) == common::Status::kOk);
-    CHECK(elm327::take_stop_request(-1) == 0);
+    CHECK(elm327::take_stop_request(common::kInvalidNativeHandle) == 0);
 
     CHECK(elm327::ends_program(SIGTERM));
+#if defined(_WIN32)
+    CHECK(elm327::ends_program(SIGBREAK));
+#else
     CHECK(elm327::ends_program(SIGHUP));
     CHECK(elm327::ends_program(SIGPIPE));
+#endif
     CHECK(!elm327::ends_program(SIGINT));
+}
 
+#if defined(_WIN32)
+TEST_CASE(signals_console_handler) {
+    elm327::StopSignals stop{};
+    REQUIRE(common::is_ok(stop.open()));
+    CHECK(stop.open() == common::Status::kInvalidArgument);
+    // A process has one set of console handlers, so one StopSignals at a time.
+    elm327::StopSignals other{};
+    CHECK(other.open() == common::Status::kInvalidArgument);
+    CHECK(other.descriptor() == common::kInvalidNativeHandle);
+    // Nothing has arrived.
+    CHECK(stop.received() == 0);
+    CHECK(elm327::take_stop_request(stop.descriptor()) == 0);
+    CHECK(elm327::wait_until(stop.descriptor(), common::Deadline::after(1ms)) == common::Status::kOk);
+}
+#else
+TEST_CASE(signals_from_the_kernel) {
     // Real signals, on a thread of their own: the blocked mask stays with that thread.
     std::int32_t first{-1};
     std::int32_t second{-1};
@@ -311,6 +336,7 @@ TEST_CASE(signals_take_stop_requests) {
     CHECK(second == SIGINT);
     CHECK(received == 0);
 }
+#endif
 
 TEST_CASE(controller_clears_dtcs_when_writable) {
     elm327::sim::FakeElm327 fake{};

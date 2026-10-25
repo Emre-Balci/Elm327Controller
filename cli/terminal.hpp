@@ -6,12 +6,18 @@
 /// key (see LineEditor). Between the lines, while a command runs, the terminal is back in its
 /// normal mode: Ctrl+C then sends SIGINT, which stops the command (see StopSignals).
 ///
+/// On Windows the terminal is a console. In raw mode its keys arrive as the escape sequences of a
+/// terminal (ENABLE_VIRTUAL_TERMINAL_INPUT), and its output carries out the sequences that draw the
+/// line (ENABLE_VIRTUAL_TERMINAL_PROCESSING), so the same LineEditor serves both platforms.
+///
 /// Otherwise, e.g. with a script piped into elm327ctl, LineInput reads plain lines without a prompt.
 
 #ifndef ELM327_CLI_TERMINAL_HPP
 #define ELM327_CLI_TERMINAL_HPP
 
+#if !defined(_WIN32)
 #include <termios.h>
+#endif
 
 #include <array>
 #include <cstddef>
@@ -21,6 +27,7 @@
 #include "cli/console.hpp"
 #include "cli/line_editor.hpp"
 #include "common/containers/span.hpp"
+#include "common/core/config.hpp"
 #include "common/core/status.hpp"
 
 namespace elm327 {
@@ -43,7 +50,7 @@ public:
 
     /// Reads from @p input. Prompts and edited lines go to @p out, which must outlive the object.
     /// Once @p cancel_descriptor is readable, read() takes the stop request (take_stop_request()).
-    LineInput(std::int32_t input, Console& out, std::int32_t cancel_descriptor) noexcept;
+    LineInput(common::NativeHandle input, Console& out, common::NativeHandle cancel_descriptor) noexcept;
 
     /// Restores the terminal if a line was being read.
     ~LineInput();
@@ -81,6 +88,9 @@ private:
     /// Bytes taken from the input per read.
     static constexpr std::size_t kChunkSize{64U};
 
+    /// The width of a terminal that does not tell it.
+    static constexpr std::size_t kDefaultColumns{80U};
+
     [[nodiscard]] InputEvent read_edited(std::string_view prompt) noexcept;
     [[nodiscard]] InputEvent read_plain() noexcept;
 
@@ -89,15 +99,22 @@ private:
     /// return again at once.
     [[nodiscard]] InputEvent take_stop() noexcept;
 
+    // The platform's part, in terminal_posix.cpp and terminal_win32.cpp, with the constructor.
+
     /// Waits until the input or the cancel descriptor is readable.
     /// @return kOk for input (or its end), kInterrupted for the cancel descriptor, kSystemError.
     [[nodiscard]] common::Status wait() const noexcept;
 
-    /// Reads up to @p buffer.size() bytes. @return the number of bytes, 0 at the end of the input.
+    /// Reads up to @p buffer.size() bytes. @return the number of bytes, 0 at the end of the input;
+    ///         kInterrupted when nothing was read and the caller is to wait again (on Windows, Ctrl+C
+    ///         ended the read of a line from the console).
     [[nodiscard]] common::Result<std::size_t> read_bytes(common::Span<char> buffer) const noexcept;
 
     [[nodiscard]] common::Status enter_raw_mode() noexcept;
     void leave_raw_mode() noexcept;
+
+    /// The width of the output terminal in columns; kDefaultColumns when it does not tell.
+    [[nodiscard]] std::size_t columns() const noexcept;
 
     /// Draws @p prompt and the editor's line in place of the current terminal line, scrolled so
     /// that the cursor is visible.
@@ -106,12 +123,21 @@ private:
     /// Writes the completions of the editor below the line.
     void list_matches() noexcept;
 
-    std::int32_t input_;
+    common::NativeHandle input_;
     Console* out_;
-    std::int32_t cancel_descriptor_;
-    bool editing_;
+    common::NativeHandle cancel_descriptor_;
+    bool editing_{false};
     bool raw_{false};
+#if defined(_WIN32)
+    /// The input is a console, read through the console API; or a pipe, which cannot be waited for,
+    /// so wait() looks into it now and then. Otherwise it is a file, always ready.
+    bool console_input_{false};
+    bool pipe_input_{false};
+    std::uint32_t saved_input_mode_{0U};   ///< The console modes outside of read().
+    std::uint32_t saved_output_mode_{0U};
+#else
     termios saved_{};  ///< The terminal settings outside of read().
+#endif
     LineEditor editor_{};
     common::Span<const char> line_{};
     std::int32_t signal_{0};

@@ -1,7 +1,7 @@
 # Elm327Controller
 
-Tools and a library for ELM327 OBD-II adapters on Linux. They read live values, trouble codes and
-the VIN from a vehicle, monitor values over time, and pass raw commands to the adapter. A
+Tools and a library for ELM327 OBD-II adapters on Linux and Windows. They read live values, trouble
+codes and the VIN from a vehicle, monitor values over time, and pass raw commands to the adapter. A
 [read-only mode](#read-only-mode) makes the tools safe to leave connected to a car: it refuses, before
 sending, anything that could change the vehicle. An [expert mode](#expert-mode-uds-kwp-and-coding)
 adds UDS/KWP requests for the manufacturer-specific diagnostics and coding that tools such as VCDS,
@@ -21,8 +21,8 @@ The project has two parts:
     live data with plots, or in widget mode as the gauges of a classic car dashboard; trouble
     codes, the VIN, and a terminal for AT commands.
 
-`elm327sim` simulates an adapter and a vehicle on a pseudo-terminal, to try everything without
-hardware.
+`elm327sim` simulates an adapter and a vehicle on a pseudo-terminal (on Windows, a named pipe), to
+try everything without hardware.
 
 It is built on [Common](https://github.com/Emre-Balci/Common), the real-time foundation library.
 Common and Dear ImGui are git submodules in `third_party/`. The library and the command-line tool
@@ -41,6 +41,15 @@ sudo apt install libglfw3-dev     # for elm327gui; without it only the GUI is le
 cmake --preset gcc-release && cmake --build --preset gcc-release
 ```
 
+On Windows, in a Developer PowerShell or Developer Command Prompt for Visual Studio 2022 (the GUI
+needs GLFW, see [Building on Windows](#building-on-windows)):
+
+```bat
+git clone --recurse-submodules https://github.com/Emre-Balci/Elm327Controller.git
+cd Elm327Controller
+cmake --preset msvc-release && cmake --build --preset msvc-release
+```
+
 If the repository was cloned without `--recurse-submodules`, run `git submodule update --init`.
 
 No adapter at hand? `elm327sim` simulates one on a pseudo-terminal, connected to a car that keeps
@@ -51,6 +60,15 @@ accelerating and braking:
 ./build/gcc-release/cli/elm327ctl -d /dev/pts/5      # the interactive shell
 ./build/gcc-release/cli/elm327ctl -d /dev/pts/5 info # one command
 ./build/gcc-release/gui/elm327gui -d /dev/pts/5 --monitor 0C,0D
+```
+
+On Windows it offers a named pipe instead, which the tools open like a COM port:
+
+```bat
+start build\msvc-release\sim\elm327sim.exe
+rem It prints e.g. "Simulated ELM327 on \\.\pipe\elm327sim-4242-0" in a window of its own.
+build\msvc-release\cli\elm327ctl.exe -d \\.\pipe\elm327sim-4242-0
+build\msvc-release\gui\elm327gui.exe -d \\.\pipe\elm327sim-4242-0 --monitor 0C,0D
 ```
 
 `elm327sim --legacy` simulates an ISO 9141-2 car instead of a CAN car, `--ignition-off` a car that
@@ -104,7 +122,8 @@ with it.
 Keys: Ctrl+C stops the running command and returns to the prompt; at the prompt it discards the
 line. Tab completes commands, settings and their values. Up and Down browse the history. The usual
 editing keys of GNU Readline work: Home, End, Ctrl+A, Ctrl+E, Ctrl+U, Ctrl+K, Ctrl+W, Alt+B,
-Alt+F, Ctrl+L.
+Alt+F, Ctrl+L. They work the same in a Windows console, where Ctrl+Break, or closing the window,
+ends the shell after the port is closed.
 
 Without a terminal, e.g. with `elm327ctl -d /dev/ttyUSB0 < script.txt`, the shell reads plain lines
 without prompt or editing; `#` starts a comment. Its exit code is that of the last command.
@@ -339,11 +358,12 @@ The window never waits for the adapter: a worker thread owns the connection and 
 of the window one after the other, and Cancel interrupts the one in progress. Closing the window,
 or Ctrl+C in the terminal that started it, closes the serial port cleanly.
 
-Building it needs GLFW 3.3 or later: `sudo apt install libglfw3-dev`, then configure again.
-Without GLFW, CMake leaves the GUI out and says so; the library and `elm327ctl` build anyway.
+Building it needs GLFW 3.3 or later: `sudo apt install libglfw3-dev`, then configure again (on
+Windows, see [Building on Windows](#building-on-windows)). Without GLFW, CMake leaves the GUI out
+and says so; the library and `elm327ctl` build anyway.
 
-It needs a display: X11 or Wayland, e.g. WSLg on Windows 11. `--screenshot` renders the window,
-saves it and exits, for documentation and smoke tests.
+On Linux it needs a display: X11 or Wayland, e.g. WSLg on Windows 11. `--screenshot` renders the
+window, saves it and exits, for documentation and smoke tests.
 
 ### The Features tab
 
@@ -361,9 +381,10 @@ its state and has one button, and no code appears.
   setting and keeps it as the backup, changes only the feature's bits, writes it in the diagnostic
   session the module needs, reads it back to verify, and returns the module to its normal session.
   If anything does not match, nothing is written.
-- Every change is also recorded in `~/.config/elm327controller/backups.txt`, e.g. `Needle sweep:
-  module 714, DID 0600, before 12 00 40 00, after 13 00 40 00`, so that it can be undone after the
-  program has ended (in the Expert tab: target 714, then write DID 0600 with the *before* value).
+- Every change is also recorded in `~/.config/elm327controller/backups.txt` (on Windows,
+  `%APPDATA%\elm327controller\backups.txt`), e.g. `Needle sweep: module 714, DID 0600, before 12 00
+  40 00, after 13 00 40 00`, so that it can be undone after the program has ended (in the Expert
+  tab: target 714, then write DID 0600 with the *before* value).
 - In read-only mode the buttons are disabled. *Hide what this car does not have* leaves out the
   features whose module is missing or another one.
 
@@ -373,9 +394,9 @@ only the simulator: on a real car they find *Not on this car* and change nothing
 ### Adding features for your car
 
 A feature is defined once, in a text file, by someone who has verified it on the car; after that it
-is one button. `elm327gui` reads `features.ini` from `~/.config/elm327controller/`, or the file
-given with `--features`. This is the simulator's needle sweep; for your car, every value comes from
-your car:
+is one button. `elm327gui` reads `features.ini` from `~/.config/elm327controller/` (on Windows,
+`%APPDATA%\elm327controller\`), or the file given with `--features`. This is the simulator's needle
+sweep; for your car, every value comes from your car:
 
 ```ini
 # One [section] per feature; lines that start with # or ; are comments.
@@ -451,6 +472,10 @@ in the library, below the window.
   `/dev/rfcomm0` once bound with `rfcomm`.
 - Opening the device needs the `dialout` group: `sudo usermod -aG dialout "$USER"`, then log in
   again.
+- On Windows an adapter is a COM port, which the Device Manager lists under *Ports (COM & LPT)*,
+  e.g. `COM3` (the default) or `COM12`. A paired Bluetooth adapter has two; the outgoing one
+  talks to it. The device list of the GUI shows the COM ports there are. A port that another
+  program has open is reported as in use.
 - Most adapters talk at 38400 bit/s, the default. If the adapter does not answer, try 9600 or
   115200 (`-b`, `set baud`, or the Baud list of the GUI).
 - WSL does not see USB devices by default. Attach the adapter with
@@ -478,7 +503,7 @@ A program uses it like this:
 #include "elm327/controller/explain.hpp"
 
 elm327::Controller controller{};
-elm327::ConnectionSettings settings{};  // /dev/ttyUSB0, 38400 bit/s, automatic protocol
+elm327::ConnectionSettings settings{};  // /dev/ttyUSB0 or COM3, 38400 bit/s, automatic protocol
 static_cast<void>(settings.device.assign("/dev/rfcomm0"));
 const common::Status status{controller.connect(settings)};
 if (common::is_ok(status)) {
@@ -518,17 +543,17 @@ the result once, half to even, to the resolution of the PID, so `(256 * A + B) /
 | Part | Where | What it does |
 |---|---|---|
 | Commands | `cli/commands.hpp` | `Session` runs the commands over a `Controller`: once for the command line, one after the other for the shell. Output goes through `Console`, without stdio. |
-| Shell | `cli/shell.hpp`, `cli/terminal.hpp`, `cli/line_editor.hpp` | The shell reads lines through `LineInput`: in raw mode on a terminal, where `LineEditor` turns the keys into a line, or as plain lines from a pipe. While a command runs the terminal is back in its normal mode, so Ctrl+C reaches the command as SIGINT (through `StopSignals`), and the shell takes the request and goes on. |
+| Shell | `cli/shell.hpp`, `cli/terminal.hpp`, `cli/line_editor.hpp` | The shell reads lines through `LineInput`: in raw mode on a terminal, where `LineEditor` turns the keys into a line, or as plain lines from a pipe. While a command runs the terminal is back in its normal mode, so Ctrl+C reaches the command as SIGINT (through `StopSignals`; on Windows as a console control event), and the shell takes the request and goes on. |
 | GUI worker | `gui/worker.hpp` | `Worker` owns the `Controller` on its own thread. The window posts requests through an `SpscQueue`; the worker publishes a `State` snapshot through a `TripleBuffer`, and PID samples, the traffic, the results of expert mode (`UdsResult`) and of the Features tab (`FeatureResult`) through four more queues. Nobody waits for anybody; `cancel()` interrupts the operation in progress. |
 | GUI window | `gui/app.hpp`, `gui/main.cpp` | `App` draws the State with ImGui each frame and turns clicks into requests. `main.cpp` sets up GLFW and the OpenGL 3 backend, and redraws on input, on a result of the worker, or 30 times per second while it works. |
 | Widget mode | `gui/gauge.hpp`, `gui/dashboard.hpp` | `gauge.hpp` knows which PIDs suit a dial and the scale of each (range, ticks, zones, words such as E and F), the geometry of needle and ticks, and plans the layout of a dashboard; it does not draw, so the tests cover it. `Dashboard` draws the dials and the digital displays with ImGui's draw lists, and moves each needle smoothly toward its value. |
-| Simulator | `sim/` | `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal: the fixture of the tests and the core of `elm327sim`. |
+| Simulator | `sim/` | `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal (on Windows, a named pipe): the fixture of the tests and the core of `elm327sim`. |
 
 ## Building and testing
 
-Requires Linux (or WSL), CMake 3.21 or later, Ninja, and GCC 9+ or Clang 10+. The GUI also needs
-GLFW 3.3 or later (`sudo apt install libglfw3-dev`); OpenGL is loaded at run time, so no OpenGL
-development files are needed.
+On Linux (or WSL) it requires CMake 3.21 or later, Ninja, and GCC 9+ or Clang 10+. The GUI also
+needs GLFW 3.3 or later (`sudo apt install libglfw3-dev`); OpenGL is loaded at run time, so no
+OpenGL development files are needed.
 
 ```bash
 cmake --preset gcc-debug          # also: gcc-release, clang-debug, clang-release, asan, tsan, tidy
@@ -547,10 +572,51 @@ ctest --preset gcc-debug
 
 The tests (`build/<preset>/tests/elm327_tests [name-filter]`) cover the parsing and decoding, run
 the adapter, the controller and every command of the command line and the shell against the
-simulated adapter, drive the shell on a pseudo-terminal like a person at a keyboard, run the GUI's
-worker thread, and check the scales and the layout of the gauges of widget mode. Run the `asan` and
-`tsan` presets after changing anything that waits, reads or uses threads. The `tidy` preset needs
-`sudo apt install clang-tidy`.
+simulated adapter, drive the shell on a pseudo-terminal (on Windows, a pseudo console) like a person
+at a keyboard, run the GUI's worker thread, and check the scales and the layout of the gauges of
+widget mode. Run the `asan` and `tsan` presets after changing anything that waits, reads or uses
+threads. The `tidy` preset needs `sudo apt install clang-tidy`.
+
+### Building on Windows
+
+Requires Windows 10 (1903 or later) or Windows 11 on x64, and Visual Studio 2022 (MSVC 19.30 or
+later) with the "Desktop development with C++" workload, which includes CMake and Ninja. In a
+Developer PowerShell or Developer Command Prompt for VS 2022:
+
+```bat
+cmake --preset msvc-debug          &rem also: msvc-release, msvc-asan
+cmake --build --preset msvc-debug
+ctest --preset msvc-debug
+```
+
+Visual Studio and VS Code (CMake Tools) open the folder and offer the same presets; each host only
+lists its own. The build uses Common's MSVC settings: `/W4` with warnings close to the GCC/Clang
+set, `/WX`, and no exceptions or RTTI. Run `msvc-release` too before finishing a change: MSVC's
+optimizer has produced wrong code that the debug build did not show (see Common's README).
+
+Windows has no GLFW, so the GUI is left out until CMake finds one: install it with
+[vcpkg](https://vcpkg.io) (`vcpkg install glfw3`, and configure with
+`-DCMAKE_TOOLCHAIN_FILE=<vcpkg root>/scripts/buildsystems/vcpkg.cmake`), or build GLFW 3.3 or later
+from source, install it and configure with `-DCMAKE_PREFIX_PATH=<its install directory>`. A GLFW
+DLL is copied next to `elm327gui.exe`.
+
+### Windows
+
+Everything builds and runs on Windows, and the tests pass there. What differs:
+
+| | Linux | Windows |
+|---|---|---|
+| Serial device | `/dev/ttyUSB0` (the default), `/dev/rfcomm0` | a COM port: `COM3` (the default), `COM12` |
+| `elm327sim` | a pseudo-terminal, e.g. `/dev/pts/5` | a named pipe, e.g. `\\.\pipe\elm327sim-4242-0`, which the library opens in place of a COM port |
+| Stop requests | SIGINT (Ctrl+C), SIGTERM, SIGHUP, SIGPIPE, through a signalfd | the console's control events: Ctrl+C (reported as SIGINT), Ctrl+Break (SIGBREAK) and closing the window (SIGTERM; Windows ends the program a few seconds later) |
+| Cancel descriptors | an eventfd or the signalfd | a manual-reset event (`common::NativeHandle`) |
+| Shell | the terminal in raw mode | the console in raw mode, with the escape sequences of a terminal for the keys and the drawing (Windows 10 and later) |
+| GUI's configuration | `~/.config/elm327controller` | `%APPDATA%\elm327controller` |
+| Permissions | the `dialout` group | none; a port that another program has open is in use |
+
+The programs take UTF-8 arguments, e.g. file paths, through a manifest that makes UTF-8 their code
+page. The serial port is Common's `SerialPort`, with overlapped I/O that ends at the deadline; the
+adapter's reads end at the cancel event too.
 
 ## Rules
 
@@ -596,5 +662,7 @@ git commit -m "Update Dear ImGui to 1.93.0"
 - Headers on (`ATH1`), to tell which ECU answered.
 - Faster monitoring: several PIDs per request on CAN, and the expected reply count after a request.
 - Baud-rate detection, and adapters over TCP (Wi-Fi).
+- Trying the Windows build with real USB and Bluetooth adapters: the tests reach its I/O through
+  the simulator's named pipe, not through a COM port.
 - CSV output for `monitor`, and recording from the GUI.
 - A persistent history for the shell.

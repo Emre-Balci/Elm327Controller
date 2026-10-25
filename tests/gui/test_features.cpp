@@ -1,5 +1,11 @@
+#if defined(_WIN32)
+#include <process.h>
+
+#include <atomic>
+#else
 #include <stdlib.h>
 #include <sys/stat.h>
+#endif
 
 #include <array>
 #include <cstdint>
@@ -23,19 +29,34 @@ using elm327::expert::FeatureList;
 using elm327::expert::FeatureParseError;
 using elm327::expert::FeatureState;
 
-/// A new empty directory under /tmp, removed with everything in it at the end.
+/// A new empty directory under /tmp (on Windows, under %TEMP%), removed with everything in it at
+/// the end. Its path is UTF-8, as the library takes paths.
 class TempDirectory final {
 public:
     TempDirectory() {
+#if defined(_WIN32)
+        // Like mkdtemp(): a new directory that no other test or process uses.
+        static std::atomic<std::uint32_t> next{0U};
+        std::error_code error{};
+        const std::filesystem::path base{std::filesystem::temp_directory_path(error)};
+        for (std::uint32_t attempt{0U}; (!error) && path_.empty() && (attempt < 100U); ++attempt) {
+            const std::filesystem::path candidate{base / ("elm327-features-" + std::to_string(::_getpid()) +
+                                                          "-" + std::to_string(next.fetch_add(1U)))};
+            if (std::filesystem::create_directory(candidate, error)) {
+                path_ = candidate.u8string();
+            }
+        }
+#else
         std::array<char, 64U> name{"/tmp/elm327-features-XXXXXX"};
         if (::mkdtemp(name.data()) != nullptr) {
             path_ = name.data();
         }
+#endif
     }
     ~TempDirectory() {
         if (!path_.empty()) {
             std::error_code ignored{};
-            static_cast<void>(std::filesystem::remove_all(path_, ignored));
+            static_cast<void>(std::filesystem::remove_all(std::filesystem::u8path(path_), ignored));
         }
     }
     TempDirectory(const TempDirectory&) = delete;
@@ -52,12 +73,12 @@ private:
 };
 
 void write_file(const std::string& path, const std::string& text) {
-    std::ofstream file{path, std::ios::binary};
+    std::ofstream file{std::filesystem::u8path(path), std::ios::binary};
     file << text;
 }
 
 std::string read_file(const std::string& path) {
-    std::ifstream file{path, std::ios::binary};
+    std::ifstream file{std::filesystem::u8path(path), std::ios::binary};
     std::ostringstream text{};
     text << file.rdbuf();
     return text.str();
@@ -151,9 +172,11 @@ TEST_CASE(features_log_change) {
     CHECK(read_file(file) ==
           "Needle sweep: module 714, DID 0600, before 12 00 40 00, after 13 00 40 00\n"
           "Needle sweep (undone): module 714, DID 0600, before 13 00 40 00, after 12 00 40 00\n");
+#if !defined(_WIN32)
     struct stat status{};
     REQUIRE(::stat(file.c_str(), &status) == 0);
     CHECK((status.st_mode & 0777U) == 0600U);  // The user's own: it holds the car's settings.
+#endif
 }
 
 TEST_CASE(features_config_directory) {
@@ -162,7 +185,12 @@ TEST_CASE(features_config_directory) {
     // Where the account has a home directory, the definitions live in its configuration directory.
     if (common::is_ok(status)) {
         const std::string path{directory.view()};
+#if defined(_WIN32)
+        // In the roaming application data, which an administrator may have moved elsewhere.
+        const std::string suffix{"\\elm327controller"};
+#else
         const std::string suffix{"/.config/elm327controller"};
+#endif
         REQUIRE(path.size() > suffix.size());
         CHECK(path.compare(path.size() - suffix.size(), suffix.size(), suffix) == 0);
     } else {

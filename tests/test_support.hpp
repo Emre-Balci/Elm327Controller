@@ -1,11 +1,10 @@
 /// @file test_support.hpp
-/// @brief Conversions between the library's spans and the standard types the tests compare with.
+/// @brief Conversions between the library's spans and the standard types the tests compare with,
+///        and what the tests need from the operating system, on Linux and Windows. The operating
+///        system's headers stay in test_support.cpp: <windows.h> defines macros such as near.
 
 #ifndef ELM327_TEST_SUPPORT_HPP
 #define ELM327_TEST_SUPPORT_HPP
-
-#include <sys/eventfd.h>
-#include <unistd.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -15,44 +14,100 @@
 #include <vector>
 
 #include "common/containers/span.hpp"
+#include "common/core/config.hpp"
 #include "elm327/adapter/response.hpp"
 
 namespace test {
 
-/// An eventfd that becomes readable once signal() is called: a cancel descriptor for the tests.
+#if defined(_WIN32)
+/// A device that does not exist.
+inline constexpr const char* kMissingDevice{"\\\\.\\elm327-missing"};
+/// A device that exists but is not a serial port.
+inline constexpr const char* kNotSerialDevice{"NUL"};
+#else
+inline constexpr const char* kMissingDevice{"/nonexistent/ttyUSB9"};
+inline constexpr const char* kNotSerialDevice{"/dev/null"};
+#endif
+
+/// An eventfd (on Windows, a manual-reset event) that becomes readable once signal() is called: a
+/// cancel descriptor for the tests.
 class Event final {
 public:
-    Event() : descriptor_{::eventfd(0U, EFD_CLOEXEC | EFD_NONBLOCK)} {}
-    ~Event() {
-        if (descriptor_ >= 0) {
-            static_cast<void>(::close(descriptor_));
-        }
-    }
+    Event();
+    ~Event();
     Event(const Event&) = delete;
     Event& operator=(const Event&) = delete;
     Event(Event&&) = delete;
     Event& operator=(Event&&) = delete;
 
-    [[nodiscard]] int descriptor() const {
+    [[nodiscard]] bool valid() const {
+        return descriptor_ != common::kInvalidNativeHandle;
+    }
+
+    [[nodiscard]] common::NativeHandle descriptor() const {
         return descriptor_;
     }
 
-    void signal() const {
-        const std::uint64_t one{1U};
-        // A void cast does not silence warn_unused_result (glibc with _FORTIFY_SOURCE).
-        const ssize_t written{::write(descriptor_, &one, sizeof(one))};
-        static_cast<void>(written);
-    }
+    void signal() const;
 
     /// Makes the descriptor unreadable again, as an interactive program does before it goes on.
-    void clear() const {
-        std::uint64_t value{0U};
-        const ssize_t count{::read(descriptor_, &value, sizeof(value))};
-        static_cast<void>(count);
-    }
+    void clear() const;
 
 private:
-    int descriptor_;
+    common::NativeHandle descriptor_{common::kInvalidNativeHandle};
+};
+
+/// A file in memory (on Windows, a temporary file that is deleted when it is closed) for a Console
+/// to write to; text() reads back what was written.
+class Capture final {
+public:
+    Capture();
+    ~Capture();
+    Capture(const Capture&) = delete;
+    Capture& operator=(const Capture&) = delete;
+    Capture(Capture&&) = delete;
+    Capture& operator=(Capture&&) = delete;
+
+    [[nodiscard]] bool valid() const {
+        return descriptor_ != common::kInvalidNativeHandle;
+    }
+
+    [[nodiscard]] common::NativeHandle descriptor() const {
+        return descriptor_;
+    }
+
+    /// Everything written so far.
+    [[nodiscard]] std::string text() const;
+
+private:
+    common::NativeHandle descriptor_{common::kInvalidNativeHandle};
+};
+
+/// A pipe whose reading end gives what write_and_close() put into it and then the end of the input,
+/// like a script piped into a program.
+class Pipe final {
+public:
+    Pipe();
+    ~Pipe();
+    Pipe(const Pipe&) = delete;
+    Pipe& operator=(const Pipe&) = delete;
+    Pipe(Pipe&&) = delete;
+    Pipe& operator=(Pipe&&) = delete;
+
+    [[nodiscard]] bool valid() const {
+        return read_ != common::kInvalidNativeHandle;
+    }
+
+    [[nodiscard]] common::NativeHandle read_end() const {
+        return read_;
+    }
+
+    /// Writes @p text, far less than the pipe holds, and closes the writing end.
+    void write_and_close(const std::string& text);
+
+private:
+    common::NativeHandle read_{common::kInvalidNativeHandle};
+    common::NativeHandle write_{common::kInvalidNativeHandle};
 };
 
 inline common::Span<const char> span_of(const std::string_view text) {

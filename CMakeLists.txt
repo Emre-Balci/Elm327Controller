@@ -5,8 +5,8 @@ project(elm327controller
     DESCRIPTION "Library, interactive command-line tool and GUI for ELM327 OBD-II adapters"
     LANGUAGES CXX)
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    message(FATAL_ERROR "Elm327Controller targets Linux only (use WSL on Windows)")
+if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
+    message(FATAL_ERROR "Elm327Controller targets Linux and Windows only")
 endif()
 
 option(ELM327_BUILD_CLI "Build the elm327ctl command-line tool" ${PROJECT_IS_TOP_LEVEL})
@@ -32,9 +32,24 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
 endif()
 
+if(MSVC)
+    # CMake's default flags turn on exceptions and RTTI (/EHsc /GR), which common::options turns off
+    # for every target here; removing the defaults spares cl's warning D9025 about overriding them.
+    string(REGEX REPLACE "(^| )/(EHsc|GR)( |$)" " " CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS}")
+    # The programs take their arguments, e.g. file paths, in UTF-8 as Common expects them (the
+    # manifest makes UTF-8 the code page of the process, from Windows 10 1903 on).
+    set(ELM327_WINDOWS_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/cmake/utf8.manifest")
+endif()
+if(WIN32)
+    # <windows.h> without its min and max macros, which break std::min and numeric_limits::max, and
+    # without the parts of the API that nothing here uses.
+    add_compile_definitions(NOMINMAX WIN32_LEAN_AND_MEAN)
+endif()
+
 # Common, the real-time foundation library, is the git submodule third_party/common. Every target
 # here links its compiler policy common::options (warnings, -ffp-contract=off, -fno-exceptions,
-# -fno-rtti); the cache variable COMMON_SANITIZER selects sanitizers for Common and this project.
+# -fno-rtti, or their MSVC counterparts); the cache variable COMMON_SANITIZER selects sanitizers for
+# Common and this project.
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/third_party/common/CMakeLists.txt")
     message(FATAL_ERROR "third_party/common is empty: run 'git submodule update --init'")
 endif()

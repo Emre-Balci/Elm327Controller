@@ -1,9 +1,13 @@
 #include "sim/fake_elm327.hpp"
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <poll.h>
 #include <stdlib.h>
 #include <unistd.h>
+#endif
 
 #include <array>
 #include <cctype>
@@ -34,6 +38,27 @@ constexpr std::size_t kConsecutiveFrameSize{7U};
 
 /// How often send() retries while the pseudo-terminal's buffer is full.
 constexpr int kSendAttempts{100};
+
+#if defined(_WIN32)
+/// The buffers of the pipe, each way.
+constexpr DWORD kPipeBuffer{4096U};
+
+/// How long the simulation thread waits for I/O before it looks at stop_, in milliseconds.
+constexpr DWORD kPollMilliseconds{20U};
+
+/// How long send() waits for the program to take a reply off the pipe, in milliseconds.
+constexpr DWORD kSendMilliseconds{1000U};
+
+/// Numbers the pipes of the simulators of one process.
+std::atomic<std::uint32_t> g_next_pipe{0U};
+
+std::wstring widen(const std::string& text) {
+    std::wstring wide(text.size() + 1U, L'\0');
+    const int length{::MultiByteToWideChar(CP_UTF8, 0U, text.c_str(), -1, wide.data(), static_cast<int>(wide.size()))};
+    wide.resize((length > 0) ? (static_cast<std::size_t>(length) - 1U) : 0U);
+    return wide;
+}
+#endif
 
 std::string hex_digit(const std::size_t value) {
     return std::string(1U, kHexDigits[value & 0x0FU]);
@@ -119,7 +144,11 @@ bool is_accepted_setting(const std::string& name) {
 }
 
 std::vector<std::uint8_t> ascii(const std::string& text) {
-    return std::vector<std::uint8_t>{text.begin(), text.end()};
+    std::vector<std::uint8_t> bytes{};
+    for (const char character : text) {
+        bytes.push_back(static_cast<std::uint8_t>(character));
+    }
+    return bytes;
 }
 
 }  // namespace
@@ -160,21 +189,21 @@ Vehicle example_vehicle() {
         vin_bytes.push_back(static_cast<std::uint8_t>(character));
     }
     vehicle.data_by_identifier = {
-        {0xF190U, vin_bytes},  // VIN, read with 'uds read F190' (multi-frame on CAN).
-        {0x0407U, {0x00U}},    // An example one-byte coding block, writable with 'uds write 0407 ..'.
+        {std::uint16_t{0xF190U}, vin_bytes},  // VIN, read with 'uds read F190' (multi-frame on CAN).
+        {0x0407U, {0x00U}},  // An example one-byte coding block, writable with 'uds write 0407 ..'.
     };
     // Two more modules, for the features: each tells its part number (F187) and keeps a coding
     // (0600) that only changes in the extended session; the cluster also has a locked setting.
     vehicle.modules = {
         {"714",  // Instrument cluster; replies from 77E.
          {
-             {0xF187U, ascii("SIM-CLUSTER-01")},
+             {std::uint16_t{0xF187U}, ascii("SIM-CLUSTER-01")},
              {0x0600U, {0x12U, 0x00U, 0x40U, 0x00U}},  // Needle sweep off (byte 0 bit 0), digital speed on.
              {0x0601U, {0x00U}},                       // Needs security access.
          }},
         {"70E",  // Body control module; replies from 778.
          {
-             {0xF187U, ascii("SIM-BCM-02")},
+             {std::uint16_t{0xF187U}, ascii("SIM-BCM-02")},
              {0x0600U, {0x00U, 0x08U, 0x00U}},  // Mirrors fold off (byte 0 bit 1), daytime lights on.
              {0x0410U, {0x03U}},                // Comfort turn signal: 3 flashes.
          }},
@@ -184,6 +213,26 @@ Vehicle example_vehicle() {
     return vehicle;
 }
 
+#if defined(_WIN32)
+FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour)
+    : vehicle_{std::move(vehicle)}, behaviour_{std::move(behaviour)}, linefeeds_{behaviour_.linefeeds} {
+    const std::string name{"\\\\.\\pipe\\elm327sim-" + std::to_string(::GetCurrentProcessId()) + "-" +
+                           std::to_string(g_next_pipe.fetch_add(1U))};
+    // One instance, so that one program at a time has the simulated adapter, as with a serial port.
+    const HANDLE pipe{::CreateNamedPipeW(widen(name).c_str(),
+                                         PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+                                         PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
+                                         1U, kPipeBuffer, kPipeBuffer, 0U, nullptr)};
+    pipe_ = (pipe != INVALID_HANDLE_VALUE) ? pipe : nullptr;
+    event_ = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if ((pipe_ != nullptr) && (event_ != nullptr)) {
+        device_path_ = name;
+    }
+    if (valid()) {
+        thread_ = std::thread{[this]() { run(); }};
+    }
+}
+#else
 FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour)
     : vehicle_{std::move(vehicle)}, behaviour_{std::move(behaviour)}, linefeeds_{behaviour_.linefeeds} {
     master_ = ::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
@@ -199,14 +248,21 @@ FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour)
         thread_ = std::thread{[this]() { run(); }};
     }
 }
+#endif
 
 FakeElm327::~FakeElm327() {
     hang_up();
 }
 
+#if defined(_WIN32)
+bool FakeElm327::valid() const {
+    return (pipe_ != nullptr) && (event_ != nullptr) && (!device_path_.empty());
+}
+#else
 bool FakeElm327::valid() const {
     return (master_ >= 0) && (!device_path_.empty());
 }
+#endif
 
 void FakeElm327::set_pid(const std::uint8_t pid, std::vector<std::uint8_t> data) {
     const std::lock_guard<std::mutex> lock{mutex_};
@@ -235,6 +291,83 @@ std::vector<std::uint8_t> FakeElm327::did_value(const std::string& header, const
     return value;
 }
 
+#if defined(_WIN32)
+void FakeElm327::hang_up() {
+    stop_.store(true);
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+    if (pipe_ != nullptr) {
+        // The program that has the pipe open finds it broken, like an unplugged adapter.
+        static_cast<void>(::DisconnectNamedPipe(pipe_));
+        static_cast<void>(::CloseHandle(pipe_));
+        pipe_ = nullptr;
+    }
+    if (event_ != nullptr) {
+        static_cast<void>(::CloseHandle(event_));
+        event_ = nullptr;
+    }
+}
+
+void FakeElm327::run() {
+    std::array<char, 256U> buffer{};
+    bool connected{false};
+    while (!stop_.load()) {
+        // Waits for a program to open the pipe, or for what it sends.
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event_;
+        bool started{false};
+        bool closed{false};  // The program has closed its end.
+        if (connected) {
+            started = (::ReadFile(pipe_, buffer.data(), static_cast<DWORD>(buffer.size()), nullptr, &overlapped) !=
+                       FALSE) ||
+                      (::GetLastError() == ERROR_IO_PENDING);
+            closed = !started;
+        } else if (::ConnectNamedPipe(pipe_, &overlapped) != FALSE) {
+            connected = true;
+        } else {
+            const DWORD error{::GetLastError()};
+            if (error == ERROR_IO_PENDING) {
+                started = true;
+            } else if (error == ERROR_PIPE_CONNECTED) {
+                connected = true;  // A program opened the pipe before the call.
+            } else if (error == ERROR_NO_DATA) {
+                static_cast<void>(::DisconnectNamedPipe(pipe_));  // One opened it and closed it again.
+            } else {
+                std::this_thread::sleep_for(10ms);  // Try again in a moment.
+            }
+        }
+        if (started) {
+            bool completed{false};
+            while ((!completed) && (!stop_.load())) {
+                completed = ::WaitForSingleObject(event_, kPollMilliseconds) == WAIT_OBJECT_0;
+            }
+            if (!completed) {
+                static_cast<void>(::CancelIoEx(pipe_, &overlapped));  // Stopping.
+            }
+            DWORD count{0U};
+            const bool succeeded{::GetOverlappedResult(pipe_, &overlapped, &count, TRUE) != FALSE};
+            if (!completed) {
+                // Stopping.
+            } else if (!connected) {
+                connected = succeeded;  // A program opened the pipe.
+                if (!succeeded) {
+                    static_cast<void>(::DisconnectNamedPipe(pipe_));
+                }
+            } else if (succeeded) {
+                receive(buffer.data(), static_cast<std::size_t>(count));
+            } else {
+                closed = true;
+            }
+        }
+        if (closed) {
+            // Ready for the next program, as a pseudo-terminal can be opened again.
+            static_cast<void>(::DisconnectNamedPipe(pipe_));
+            connected = false;
+        }
+    }
+}
+#else
 void FakeElm327::hang_up() {
     stop_.store(true);
     if (thread_.joinable()) {
@@ -265,6 +398,7 @@ void FakeElm327::run() {
         }
     }
 }
+#endif
 
 void FakeElm327::receive(const char* const data, const std::size_t size) {
     for (std::size_t index{0U}; index < size; ++index) {
@@ -652,6 +786,32 @@ void FakeElm327::reset() {
     header_.clear();  // The modules keep their session: a reset of the adapter does not reach them.
 }
 
+#if defined(_WIN32)
+void FakeElm327::send(const std::string& text) const {
+    // On the simulation thread, between two reads: the event is free.
+    std::size_t written{0U};
+    for (int attempt{0}; (written < text.size()) && (attempt < kSendAttempts); ++attempt) {
+        OVERLAPPED overlapped{};
+        overlapped.hEvent = event_;
+        const DWORD size{static_cast<DWORD>(text.size() - written)};
+        if ((::WriteFile(pipe_, text.data() + written, size, nullptr, &overlapped) != FALSE) ||
+            (::GetLastError() == ERROR_IO_PENDING)) {
+            // A program that does not read for a long time loses the rest of the reply.
+            if (::WaitForSingleObject(event_, kSendMilliseconds) != WAIT_OBJECT_0) {
+                static_cast<void>(::CancelIoEx(pipe_, &overlapped));
+            }
+            DWORD count{0U};
+            if ((::GetOverlappedResult(pipe_, &overlapped, &count, TRUE) != FALSE) && (count > 0U)) {
+                written += static_cast<std::size_t>(count);
+            } else {
+                attempt = kSendAttempts;
+            }
+        } else {
+            attempt = kSendAttempts;  // Nobody has the pipe open: drop the output.
+        }
+    }
+}
+#else
 void FakeElm327::send(const std::string& text) const {
     std::size_t written{0U};
     for (int attempt{0}; (written < text.size()) && (attempt < kSendAttempts); ++attempt) {
@@ -665,6 +825,7 @@ void FakeElm327::send(const std::string& text) const {
         }
     }
 }
+#endif
 
 }  // namespace sim
 }  // namespace elm327

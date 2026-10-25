@@ -31,13 +31,14 @@ sigset_t stop_signal_set() noexcept {
 }  // namespace
 
 StopSignals::~StopSignals() {
-    if (descriptor_ >= 0) {
+    if (descriptor_ != common::kInvalidNativeHandle) {
         static_cast<void>(::close(descriptor_));
     }
 }
 
 common::Status StopSignals::open() noexcept {
-    common::Status status{(descriptor_ < 0) ? common::Status::kOk : common::Status::kInvalidArgument};
+    common::Status status{(descriptor_ == common::kInvalidNativeHandle) ? common::Status::kOk
+                                                                        : common::Status::kInvalidArgument};
     const sigset_t set{stop_signal_set()};
     if (is_ok(status)) {
         // A blocked signal stays pending instead of ending the process, and the signalfd reports it.
@@ -55,7 +56,7 @@ common::Status StopSignals::open() noexcept {
 }
 
 std::int32_t StopSignals::received() noexcept {
-    if ((signal_ == 0) && (descriptor_ >= 0)) {
+    if ((signal_ == 0) && (descriptor_ != common::kInvalidNativeHandle)) {
         signalfd_siginfo info{};
         const ssize_t count{::read(descriptor_, &info, sizeof(info))};
         if (count == static_cast<ssize_t>(sizeof(info))) {
@@ -65,7 +66,7 @@ std::int32_t StopSignals::received() noexcept {
     return signal_;
 }
 
-std::int32_t take_stop_request(const std::int32_t descriptor) noexcept {
+std::int32_t take_stop_request(const common::NativeHandle descriptor) noexcept {
     std::int32_t taken{0};
     bool more{descriptor >= 0};
     for (std::uint32_t round{0U}; more && (round < kMaxTakes); ++round) {

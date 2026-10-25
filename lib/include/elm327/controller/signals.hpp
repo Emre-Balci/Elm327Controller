@@ -12,23 +12,32 @@
 /// unreadable again once the interrupted command has ended.
 ///
 /// No signal handler is involved, so nothing has to be async-signal-safe.
+///
+/// Windows has no such signals, but console control events, which a handler function receives on a
+/// thread of its own. There StopSignals installs that handler, which records the event and signals a
+/// manual-reset event, the descriptor: Ctrl+C is reported as SIGINT, Ctrl+Break as SIGBREAK, and
+/// closing the console window (or logging off, or shutting down) as SIGTERM. Windows ends the
+/// process a few seconds after a close event at the latest.
 
 #ifndef ELM327_CONTROLLER_SIGNALS_HPP
 #define ELM327_CONTROLLER_SIGNALS_HPP
 
 #include <cstdint>
 
+#include "common/core/config.hpp"
 #include "common/core/status.hpp"
 
 namespace elm327 {
 
 /// SIGINT (Ctrl+C), SIGTERM, SIGHUP (closed terminal) and SIGPIPE (closed output pipe), received
-/// through a descriptor. A program needs one, created at the start of main().
+/// through a descriptor; on Windows, the console control events (see above). A program needs one,
+/// created at the start of main().
 class StopSignals final {
 public:
     StopSignals() noexcept = default;
 
-    /// Closes the descriptor. The signals stay blocked.
+    /// Closes the descriptor. The signals stay blocked. On Windows the handler is removed, so that
+    /// Ctrl+C ends the process again.
     ~StopSignals();
 
     StopSignals(const StopSignals&) = delete;
@@ -38,11 +47,13 @@ public:
 
     /// Blocks the signals for the calling thread and opens the descriptor. Call it before any other
     /// thread starts, so that all threads inherit the blocked signals.
-    /// @return kOk; kInvalidArgument if it is open already; kSystemError if a call failed.
+    /// @return kOk; kInvalidArgument if it is open already (on Windows, also when another StopSignals
+    ///         is open, since a process has one set of console handlers); kSystemError if a call failed.
     common::Status open() noexcept;
 
-    /// The descriptor, readable once a signal has arrived; -1 when not open.
-    [[nodiscard]] std::int32_t descriptor() const noexcept {
+    /// The descriptor, readable once a signal has arrived (on Windows, the event, signaled then);
+    /// kInvalidNativeHandle (-1 on Linux) when not open.
+    [[nodiscard]] common::NativeHandle descriptor() const noexcept {
         return descriptor_;
     }
 
@@ -50,18 +61,20 @@ public:
     [[nodiscard]] std::int32_t received() noexcept;
 
 private:
-    std::int32_t descriptor_{-1};
+    common::NativeHandle descriptor_{common::kInvalidNativeHandle};
     std::int32_t signal_{0};
 };
 
 /// Takes the stop requests pending on @p descriptor, the descriptor of a StopSignals or an eventfd
-/// (as the tests and the GUI use), so that it is no longer readable. Does not wait.
-/// @return the signal that was pending: SIGTERM, SIGHUP or SIGPIPE when one of them was, since they
-///         end a program; otherwise SIGINT for a SIGINT or an eventfd; 0 if nothing was pending.
-[[nodiscard]] std::int32_t take_stop_request(std::int32_t descriptor) noexcept;
+/// (as the tests and the GUI use; on Windows, a manual-reset event), so that it is no longer
+/// readable. Does not wait.
+/// @return the signal that was pending: one that ends a program (see ends_program()) when one of
+///         them was; otherwise SIGINT for a SIGINT or an eventfd; 0 if nothing was pending.
+[[nodiscard]] std::int32_t take_stop_request(common::NativeHandle descriptor) noexcept;
 
 /// @return true for the signals after which an interactive program ends instead of going on:
-///         every stop signal except SIGINT.
+///         every stop signal except SIGINT, i.e. SIGTERM, SIGHUP and SIGPIPE (on Windows, SIGTERM
+///         and SIGBREAK).
 [[nodiscard]] bool ends_program(std::int32_t signal) noexcept;
 
 }  // namespace elm327

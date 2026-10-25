@@ -3,6 +3,7 @@
 # tests, they use the heap, std::string and std::thread, and are outside the compliance scope.
 add_executable(elm327_tests
     test_main.cpp
+    test_support.cpp
     adapter/test_adapter.cpp
     adapter/test_response.cpp
     cli/test_commands.cpp
@@ -20,7 +21,8 @@ add_executable(elm327_tests
     obd/test_message.cpp
     obd/test_pid.cpp
     obd/test_service.cpp
-    obd/test_vin.cpp)
+    obd/test_vin.cpp
+    ${ELM327_WINDOWS_MANIFEST})
 
 # test_framework.hpp and test_support.hpp live here; tests in group subdirectories include them by name.
 target_include_directories(elm327_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
