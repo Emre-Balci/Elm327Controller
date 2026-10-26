@@ -3,13 +3,14 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 
 #include <array>
 #include <cerrno>
 #include <cstddef>
 #include <cstdint>
+
+#include "detail/poll_until.hpp"
 
 namespace elm327 {
 namespace {
@@ -22,13 +23,13 @@ constexpr std::size_t kDiscardSize{256U};
 /// each take one. The bound only guards against a signal storm.
 constexpr std::uint32_t kMaxWriteCalls{1000U};
 
-timespec to_relative_timespec(const common::Duration duration) noexcept {
-    const std::int64_t ns{duration.count()};
-    timespec ts{};
-    ts.tv_sec = ns / common::MonotonicClock::kNanosPerSecond;
-    ts.tv_nsec = ns % common::MonotonicClock::kNanosPerSecond;
-    return ts;
-}
+/// The flags of send() on a stream: a peer that went away is EPIPE rather than a SIGPIPE that ends
+/// the process. macOS and iOS lack MSG_NOSIGNAL and set SO_NOSIGPIPE on the socket instead.
+#if defined(MSG_NOSIGNAL)
+constexpr int kSendFlags{MSG_NOSIGNAL};
+#else
+constexpr int kSendFlags{0};
+#endif
 
 /// Waits until @p port has input or reports an error, @p cancel is readable, or @p deadline passes.
 /// @return kOk, kInterrupted or kTimeout.
@@ -39,13 +40,7 @@ common::Status wait_for_input(const common::NativeHandle port, const common::Nat
     entries[0U].events = POLLIN;
     entries[1U].fd = cancel;  // poll() skips a negative descriptor.
     entries[1U].events = POLLIN;
-    timespec timeout{};
-    const timespec* timeout_pointer{nullptr};
-    if (!deadline.is_never()) {
-        timeout = to_relative_timespec(deadline.remaining());
-        timeout_pointer = &timeout;
-    }
-    const int ready{::ppoll(entries.data(), entries.size(), timeout_pointer, nullptr)};
+    const int ready{detail::poll_until(entries, deadline)};
     common::Status status{common::Status::kTimeout};
     if (ready < 0) {
         // After a signal handler ran, the read finds no data and the caller waits again.
@@ -63,16 +58,10 @@ common::Status wait_for_input(const common::NativeHandle port, const common::Nat
 /// Waits until @p stream takes more output or @p deadline passes. @return kOk (also for a hang-up or
 /// an error, which the write then reports), kTimeout, or kSystemError.
 common::Status wait_for_room(const common::NativeHandle stream, const common::Deadline& deadline) noexcept {
-    pollfd entry{};
-    entry.fd = stream;
-    entry.events = POLLOUT;
-    timespec timeout{};
-    const timespec* timeout_pointer{nullptr};
-    if (!deadline.is_never()) {
-        timeout = to_relative_timespec(deadline.remaining());
-        timeout_pointer = &timeout;
-    }
-    const int ready{::ppoll(&entry, 1U, timeout_pointer, nullptr)};
+    std::array<pollfd, 1U> entries{};
+    entries[0U].fd = stream;
+    entries[0U].events = POLLOUT;
+    const int ready{detail::poll_until(entries, deadline)};
     common::Status status{common::Status::kOk};
     if (ready < 0) {
         status = (errno == EINTR) ? common::Status::kOk : common::Status::kSystemError;
@@ -125,6 +114,13 @@ common::Status Adapter::adopt_stream(const common::NativeHandle stream) noexcept
         status = ((flags >= 0) && (::fcntl(stream, F_SETFL, flags | O_NONBLOCK) == 0)) ? common::Status::kOk
                                                                                        : common::Status::kSystemError;
     }
+#if defined(SO_NOSIGPIPE)
+    if (is_ok(status)) {
+        const int on{1};
+        status = (::setsockopt(stream, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on)) == 0) ? common::Status::kOk
+                                                                                       : common::Status::kSystemError;
+    }
+#endif
     if (is_ok(status)) {
         stream_ = stream;
     } else if (stream != common::kInvalidNativeHandle) {
@@ -172,8 +168,7 @@ common::Status Adapter::write_all(const common::Span<const std::uint8_t> data,
     } else {
         common::Span<const std::uint8_t> rest{data};
         for (std::uint32_t call{0U}; is_ok(status) && (!rest.empty()) && (call < kMaxWriteCalls); ++call) {
-            // MSG_NOSIGNAL: a peer that went away is EPIPE rather than a SIGPIPE that ends the process.
-            const ssize_t count{::send(stream_, rest.data(), rest.size(), MSG_NOSIGNAL)};
+            const ssize_t count{::send(stream_, rest.data(), rest.size(), kSendFlags)};
             if (count >= 0) {
                 rest = rest.subspan(static_cast<std::size_t>(count));
             } else if (errno == EAGAIN) {  // EWOULDBLOCK is the same.

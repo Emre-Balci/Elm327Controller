@@ -4,12 +4,11 @@
 ///
 /// An Android app reaches Bluetooth only through the Java API: a Bluetooth adapter speaks the serial
 /// port profile (RFCOMM), and MainActivity connects a BluetoothSocket to it. open_link(), the
-/// LinkOpener of the Worker, hands MainActivity one end of a socket pair together with the address;
-/// MainActivity connects, answers one status byte, and then copies the bytes between the
-/// BluetoothSocket and that end in both directions. The Adapter reads and writes the other end like
-/// a serial device (Adapter::open_stream()). Closing either side ends the link: when the Adapter
-/// closes its end, MainActivity closes the Bluetooth connection, and when the adapter goes away,
-/// the Adapter finds its end closed (kDisconnected).
+/// LinkOpener of the Worker, opens a bridged link (see elm327/controller/bridged_link.hpp):
+/// MainActivity gets one end of a socket pair with the address, connects, answers its status byte,
+/// and copies the bytes between the BluetoothSocket and that end; the Adapter reads and writes the
+/// other end. When the Adapter closes its end, MainActivity closes the Bluetooth connection, and
+/// when the adapter goes away, the Adapter finds its end closed (kDisconnected).
 ///
 /// The simulator runs inside the app as the device "sim", on a socket pair as well, so the app can
 /// be tried without a car.
@@ -36,10 +35,8 @@ namespace elm327 {
 namespace gui {
 namespace bridge {
 
-/// The device of a Bluetooth adapter is this followed by its address, e.g. "bt:00:1D:A5:68:98:8B".
-inline constexpr std::string_view kBluetoothPrefix{"bt:"};
-
-/// The device of the simulator inside the app.
+/// The device of the simulator inside the app. (A Bluetooth adapter is elm327::kBluetoothPrefix and
+/// its address, e.g. "bt:00:1D:A5:68:98:8B".)
 inline constexpr std::string_view kSimulatorDevice{"sim"};
 
 /// A Bluetooth device paired with the phone in Android's settings.

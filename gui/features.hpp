@@ -5,7 +5,8 @@
 /// the ones built in for elm327sim's simulated car, so that the tab can be tried without a car, and
 /// the user's own file, by default features.ini in the configuration directory
 /// ~/.config/elm327controller (on Windows, %APPDATA%\elm327controller; on Android, the app's
-/// directory on the shared storage, Android/data/<app>/files). Every change the tab makes
+/// directory on the shared storage, Android/data/<app>/files; on iOS, the app's Documents, which the
+/// Files app shows). Every change the tab makes
 /// is appended to backups.txt in that directory, with the setting's value before and after, so that
 /// it can be restored even after the program has ended (with the Expert tab, or by hand).
 
@@ -40,18 +41,17 @@ inline constexpr char kPathSeparator{'/'};
 
 /// The directory of the user's definitions and backups, ~/.config/elm327controller, with the home
 /// directory from the password database (not the environment). On Windows it is elm327controller in
-/// the user's roaming application data, the known folder that %APPDATA% names. On Android it is the
-/// directory that set_config_directory() gave.
+/// the user's roaming application data, the known folder that %APPDATA% names. The directory that
+/// set_config_directory() gave comes first (on Android, there is no other).
 /// @return kOk; kNotFound when the home directory is unknown; kOutOfRange when the path is too long.
 [[nodiscard]] common::Status config_directory(Path& directory) noexcept;
 
-#if defined(__ANDROID__)
-/// Android has no home directory: the app gives config_directory() its files directory on the
-/// shared storage (ANativeActivity::externalDataPath), where a person can put features.ini and
-/// find backups.txt over USB. Call once at the start, before anything asks.
-/// @return kOk; kOutOfRange when @p directory is too long (config_directory() then finds none).
+/// Gives config_directory() a directory in place of the system's: the apps give theirs, where a
+/// person can put features.ini and find backups.txt (Android: ANativeActivity::externalDataPath,
+/// reached over USB; iOS: the app's Documents, in the Files app). An empty @p directory goes back to
+/// the system's. Call it at the start, before anything asks.
+/// @return kOk; kOutOfRange when @p directory is too long (it then goes back to the system's).
 common::Status set_config_directory(std::string_view directory) noexcept;
-#endif
 
 /// The definitions of the Features tab, as load_definitions() found them.
 struct Definitions final {

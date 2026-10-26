@@ -6,17 +6,27 @@ project(elm327controller
     LANGUAGES CXX)
 
 if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows" OR
-        CMAKE_SYSTEM_NAME STREQUAL "Android"))
-    message(FATAL_ERROR "Elm327Controller targets Linux, Windows and Android only")
+        CMAKE_SYSTEM_NAME STREQUAL "Android" OR CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR
+        CMAKE_SYSTEM_NAME STREQUAL "iOS"))
+    message(FATAL_ERROR "Elm327Controller targets Linux, Windows, Android, macOS and iOS only")
 endif()
 if(ANDROID)
     # The glue of the GUI's native activity is C.
     enable_language(C)
+elseif(IOS)
+    # The iOS app's side of UIKit, Metal and Core Bluetooth is Objective-C++.
+    enable_language(OBJCXX)
 endif()
 
-option(ELM327_BUILD_CLI "Build the elm327ctl command-line tool" ${PROJECT_IS_TOP_LEVEL})
-option(ELM327_BUILD_TESTS "Build unit tests" ${PROJECT_IS_TOP_LEVEL})
-option(ELM327_BUILD_SIMULATOR "Build the elm327sim adapter simulator" ${PROJECT_IS_TOP_LEVEL})
+# An iOS app is a bundle without a terminal: there, only the library and the GUI.
+if(IOS)
+    set(ELM327_PROGRAMS_DEFAULT OFF)
+else()
+    set(ELM327_PROGRAMS_DEFAULT ${PROJECT_IS_TOP_LEVEL})
+endif()
+option(ELM327_BUILD_CLI "Build the elm327ctl command-line tool" ${ELM327_PROGRAMS_DEFAULT})
+option(ELM327_BUILD_TESTS "Build unit tests" ${ELM327_PROGRAMS_DEFAULT})
+option(ELM327_BUILD_SIMULATOR "Build the elm327sim adapter simulator" ${ELM327_PROGRAMS_DEFAULT})
 option(ELM327_WARNINGS_AS_ERRORS "Treat warnings as errors" ${PROJECT_IS_TOP_LEVEL})
 option(ELM327_ENABLE_CLANG_TIDY "Run clang-tidy on this project's sources during the build" OFF)
 # AUTO builds the GUI when GLFW and the imgui submodule are there, ON requires them.
@@ -78,8 +88,8 @@ endif()
 add_subdirectory(gui)
 
 # The simulated adapter: a fixture of the tests, the elm327sim tool to try the front-ends without
-# hardware, and the demo device of the Android app.
-if(ELM327_BUILD_TESTS OR ELM327_BUILD_SIMULATOR OR (ANDROID AND NOT ELM327_BUILD_GUI STREQUAL "OFF"))
+# hardware, and the demo device of the Android and iOS apps.
+if(ELM327_BUILD_TESTS OR ELM327_BUILD_SIMULATOR OR ((ANDROID OR IOS) AND NOT ELM327_BUILD_GUI STREQUAL "OFF"))
     add_subdirectory(sim)
 endif()
 

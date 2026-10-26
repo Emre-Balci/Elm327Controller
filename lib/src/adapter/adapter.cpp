@@ -7,6 +7,9 @@
 #include <string_view>
 
 #include "common/protocol/text.hpp"
+#if !defined(_WIN32)
+#include "detail/tcp_link.hpp"
+#endif
 
 namespace elm327 {
 namespace {
@@ -98,7 +101,20 @@ Adapter::~Adapter() {
 }
 
 common::Status Adapter::open(const char* const path, const AdapterOptions& options) noexcept {
+#if defined(_WIN32)
     const common::Status status{open_device(path, options.serial)};
+#else
+    common::Status status{common::Status::kOk};
+    if (!detail::is_tcp_device(path)) {
+        status = open_device(path, options.serial);
+    } else if (is_open()) {
+        status = common::Status::kInvalidArgument;
+    } else {
+        const common::Result<common::NativeHandle> stream{
+            detail::connect_tcp(path, common::Deadline::after(options.timeouts.link), cancel_descriptor_)};
+        status = stream.has_value() ? adopt_stream(stream.value()) : stream.status();
+    }
+#endif
     if (is_ok(status)) {
         timeouts_ = options.timeouts;
         identity_.clear();

@@ -43,6 +43,10 @@ namespace elm327 {
 #if defined(_WIN32)
 /// The usual COM port of the first USB serial adapter: COM1 and COM2 are kept for built-in ports.
 inline constexpr std::string_view kDefaultDevice{"COM3"};
+#elif defined(__APPLE__)
+/// macOS names a USB serial adapter after its chip and serial number, e.g. /dev/cu.usbserial-A50285BI
+/// (FTDI): this is the start of the name; the GUI lists the devices there are.
+inline constexpr std::string_view kDefaultDevice{"/dev/cu.usbserial"};
 #else
 /// The first USB serial adapter: FTDI, CH340 and PL2303 chips appear as /dev/ttyUSB<n>.
 inline constexpr std::string_view kDefaultDevice{"/dev/ttyUSB0"};
@@ -104,6 +108,12 @@ inline constexpr std::size_t kMaxReadingText{3U * PidReading::kMaxData};
 ///         always fits).
 [[nodiscard]] common::Result<std::size_t> format_reading(const PidReading& reading, bool with_unit, char separator,
                                                          common::Span<char> out) noexcept;
+
+/// The devices of Bluetooth adapters that a LinkOpener opens: "bt:" followed by the address of a
+/// paired Bluetooth (classic) adapter, as in the Android app, e.g. "bt:00:1D:A5:68:98:8B"; "ble:"
+/// followed by the identifier of a Bluetooth Low Energy adapter, as in the iOS app.
+inline constexpr std::string_view kBluetoothPrefix{"bt:"};
+inline constexpr std::string_view kBluetoothLowEnergyPrefix{"ble:"};
 
 #if !defined(_WIN32)
 /// Opens the link to an adapter that is not a serial device, e.g. a Bluetooth adapter through the

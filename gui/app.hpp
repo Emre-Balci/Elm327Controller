@@ -171,8 +171,12 @@ private:
     void send_command() noexcept;
     /// Restarts the histories for the PIDs in @p pids.
     void reset_histories(const common::ByteSet& pids) noexcept;
-    /// Lists the serial devices that exist, for the combo next to the device field.
+    /// Lists the serial devices that exist, for the combo next to the device field; in the apps, the
+    /// Bluetooth adapters, a Wi-Fi adapter and the simulator.
     void detect_devices() noexcept;
+    /// Adds a Wi-Fi adapter at its usual address and the simulator (device @p simulator) to the list,
+    /// as the apps offer them.
+    void add_wifi_and_simulator(std::string_view simulator) noexcept;
     [[nodiscard]] std::size_t selected_count() const noexcept;
     /// The selected PIDs: monitored, plotted, and shown in widget mode.
     [[nodiscard]] common::ByteSet selection() const noexcept;

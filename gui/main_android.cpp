@@ -142,7 +142,7 @@ void choose_device(elm327::ConnectionSettings& settings) noexcept {
         }
         if (chosen) {
             settings.device.clear();
-            static_cast<void>(settings.device.append(bridge::kBluetoothPrefix) &&
+            static_cast<void>(settings.device.append(elm327::kBluetoothPrefix) &&
                               settings.device.append(paired[index].address.view()));
         }
     }

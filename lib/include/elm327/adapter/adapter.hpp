@@ -17,6 +17,7 @@
 ///
 /// Besides a serial device, an Adapter can talk over a connected stream socket (open_stream(), not
 /// on Windows): how the Android app reaches a Bluetooth adapter, through a bridge to the Java API.
+/// And it connects to adapters on Wi-Fi itself, by their IP address ("tcp:...", see open()).
 
 #ifndef ELM327_ADAPTER_ADAPTER_HPP
 #define ELM327_ADAPTER_ADAPTER_HPP
@@ -37,6 +38,13 @@
 #include "elm327/adapter/response.hpp"
 
 namespace elm327 {
+
+/// A device that is an adapter on Wi-Fi: "tcp:" followed by its IP address and port, e.g.
+/// "tcp:192.168.0.10:35000", or "tcp:[fe80::1%wlan0]:35000" for IPv6 (see Adapter::open()).
+inline constexpr std::string_view kTcpPrefix{"tcp:"};
+
+/// The address of most Wi-Fi adapters, which are their own access point.
+inline constexpr std::string_view kDefaultWifiDevice{"tcp:192.168.0.10:35000"};
 
 /// What a TraceFunction is told about.
 enum class TraceEvent : std::uint8_t {
@@ -107,8 +115,15 @@ public:
     /// Opens the serial device @p path, e.g. "/dev/ttyUSB0" (USB) or "/dev/rfcomm0" (Bluetooth); on
     /// Windows a COM port, e.g. "COM3", or a named pipe ("\\\\.\\pipe\\<name>"), which elm327sim
     /// offers there in place of the pseudo-terminal it uses on Linux.
+    ///
+    /// Except on Windows, @p path can also be an adapter on Wi-Fi (kTcpPrefix), e.g.
+    /// "tcp:192.168.0.10:35000": it connects to it within options.timeouts.link, and gives up once the
+    /// cancel descriptor is readable. The address is numeric, so no name server is asked (a lookup
+    /// could not be cancelled). The connection is then read and written as open_stream() does.
     /// @return the errors of common::SerialPort::open(), e.g. kNotFound, kPermissionDenied (not in
-    ///         the dialout group) or kResourceLimit (in use by another program).
+    ///         the dialout group) or kResourceLimit (in use by another program). For Wi-Fi:
+    ///         kInvalidArgument (not an IP address and port), kDisconnected (refused or unreachable),
+    ///         kTimeout or kInterrupted.
     common::Status open(const char* path, const AdapterOptions& options) noexcept;
 
 #if !defined(_WIN32)

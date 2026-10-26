@@ -2,7 +2,8 @@
 # gauges of widget mode, and the files of the Features tab are the library elm327gui_core, which does
 # not depend on ImGui, so the tests run them without a display. The window itself uses Dear ImGui
 # (the git submodule third_party/imgui) on GLFW and OpenGL 3; on Android it is the shared library of
-# the app's native activity (android/), on the NDK's glue and OpenGL ES 3.
+# the app's native activity (android/), on the NDK's glue and OpenGL ES 3; on iOS an app bundle, on
+# UIKit and Metal.
 if(ELM327_BUILD_TESTS OR NOT ELM327_BUILD_GUI STREQUAL "OFF")
     add_library(elm327gui_core STATIC features.cpp gauge.cpp worker.cpp)
     # The sources include each other as "gui/<file>.hpp".
@@ -23,14 +24,14 @@ endif()
 
 set(ELM327_IMGUI_DIR "${PROJECT_SOURCE_DIR}/third_party/imgui")
 set(ELM327_GUI_MISSING "")
-if(NOT ANDROID)
+if(NOT (ANDROID OR IOS))
     find_package(glfw3 3.3 QUIET)
 endif()
 if(NOT EXISTS "${ELM327_IMGUI_DIR}/imgui.cpp")
     list(APPEND ELM327_GUI_MISSING "the imgui submodule (run 'git submodule update --init')")
 endif()
-if(ANDROID)
-    # The NDK brings everything the app needs.
+if(ANDROID OR IOS)
+    # The NDK, or Xcode, brings everything the app needs.
 elseif(NOT glfw3_FOUND)
     if(WIN32)
         list(APPEND ELM327_GUI_MISSING
@@ -52,7 +53,7 @@ endif()
 # and checks, and its headers are system headers for the code that includes them. The OpenGL 3
 # backend loads OpenGL at run time, so no OpenGL development files are needed. On Android the
 # backends are those of the native activity and of OpenGL ES 3, and the NDK's glue, which is C,
-# comes along.
+# comes along. On iOS it is the Metal backend (Objective-C++, with ARC); the app handles the input.
 add_library(imgui STATIC
     ${ELM327_IMGUI_DIR}/imgui.cpp
     ${ELM327_IMGUI_DIR}/imgui_draw.cpp
@@ -69,6 +70,10 @@ if(ANDROID)
     target_include_directories(imgui SYSTEM PUBLIC "${ELM327_ANDROID_GLUE_DIR}")
     target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_ES3)
     target_link_libraries(imgui PUBLIC android EGL GLESv3 log)
+elseif(IOS)
+    target_sources(imgui PRIVATE ${ELM327_IMGUI_DIR}/backends/imgui_impl_metal.mm)
+    target_compile_options(imgui PRIVATE "$<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>")
+    target_link_libraries(imgui PUBLIC "-framework Metal" "-framework MetalKit" "-framework QuartzCore")
 else()
     target_sources(imgui PRIVATE ${ELM327_IMGUI_DIR}/backends/imgui_impl_glfw.cpp)
     target_compile_definitions(imgui PUBLIC GLFW_INCLUDE_NONE)
@@ -91,6 +96,32 @@ if(ANDROID)
     add_library(elm327gui SHARED main_android.cpp android_bridge.cpp app.cpp dashboard.cpp)
     target_link_libraries(elm327gui PRIVATE elm327gui_core elm327_sim imgui common::options)
     target_link_options(elm327gui PRIVATE "-Wl,-u,ANativeActivity_onCreate")
+    return()
+endif()
+
+if(IOS)
+    # The app bundle: UIKit and Metal (main_ios.mm) and Core Bluetooth (ios_bridge.mm), Objective-C++
+    # with ARC, around the same App; the simulator is in it as the demo device. Xcode signs it with
+    # the team of CMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM.
+    add_executable(elm327gui MACOSX_BUNDLE main_ios.mm ios_bridge.mm app.cpp dashboard.cpp ios/Assets.xcassets)
+    set_source_files_properties(ios/Assets.xcassets PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+    # The Objective-C++ was written without a Mac to compile it: until it has been built warning-free
+    # with Xcode, its warnings are shown but do not fail the build.
+    set_source_files_properties(main_ios.mm ios_bridge.mm PROPERTIES COMPILE_OPTIONS "-Wno-error")
+    set_target_properties(elm327gui PROPERTIES
+        OUTPUT_NAME Elm327Controller
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_CURRENT_SOURCE_DIR}/ios/Info.plist.in"
+        MACOSX_BUNDLE_GUI_IDENTIFIER io.github.emrebalci.elm327controller
+        MACOSX_BUNDLE_BUNDLE_NAME Elm327Controller
+        MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION}
+        MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER io.github.emrebalci.elm327controller
+        XCODE_ATTRIBUTE_CLANG_ENABLE_OBJC_ARC YES
+        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+        XCODE_ATTRIBUTE_ASSETCATALOG_COMPILER_APPICON_NAME AppIcon
+        XCODE_ATTRIBUTE_CODE_SIGN_STYLE Automatic)
+    target_link_libraries(elm327gui PRIVATE elm327gui_core elm327_sim imgui common::options
+        "-framework UIKit" "-framework CoreBluetooth")
     return()
 endif()
 

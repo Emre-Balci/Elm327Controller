@@ -33,12 +33,15 @@ struct Explanation final {
 /// description of @p status, e.g. "timed out".
 [[nodiscard]] Explanation explain_failure(common::Status status, const Response& response) noexcept;
 
-/// Explains why opening the device failed with @p status (ConnectFailure::kOpen), e.g. "no such
-/// device", or "permission denied" with the advice to join the dialout group (Linux). On Android,
-/// where the device is a Bluetooth link, the advice is about Bluetooth: pairing, the permission for
-/// nearby devices, Bluetooth being off (kNotRunning), or an adapter that does not accept the
-/// connection (kTimeout, kDisconnected).
+/// Explains why opening a serial device failed with @p status (ConnectFailure::kOpen), e.g. "no such
+/// device", or "permission denied" with the advice to join the dialout group (Linux).
 [[nodiscard]] Explanation explain_open_failure(common::Status status) noexcept;
+
+/// Explains why opening @p device failed with @p status, in the words of its kind: a Wi-Fi adapter
+/// ("tcp:..."), with advice about its address and its network; a Bluetooth adapter of a LinkOpener
+/// ("bt:...", "ble:..."), with advice about pairing, the permission, Bluetooth being off
+/// (kNotRunning) or an adapter that refuses (kTimeout, kDisconnected); otherwise a serial device.
+[[nodiscard]] Explanation explain_open_failure(common::Status status, std::string_view device) noexcept;
 
 /// Explains why Controller::connect() failed with @p status at the step @p failure (see
 /// Controller::connect_failure()): explain_open_failure() for ConnectFailure::kOpen; "the adapter
@@ -46,6 +49,10 @@ struct Explanation final {
 /// ConnectFailure::kNoAnswer; "the adapter rejected its configuration" for a kNotSupported while
 /// initializing; otherwise "interrupted" or the description of @p status.
 [[nodiscard]] Explanation explain_connect_failure(ConnectFailure failure, common::Status status) noexcept;
+
+/// explain_connect_failure() with the device that was opened, for explain_open_failure().
+[[nodiscard]] Explanation explain_connect_failure(ConnectFailure failure, common::Status status,
+                                                  std::string_view device) noexcept;
 
 }  // namespace elm327
 

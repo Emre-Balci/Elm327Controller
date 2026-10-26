@@ -1,7 +1,7 @@
 # Elm327Controller
 
-Tools and a library for ELM327 OBD-II adapters on Linux, Windows and Android. They read live values, trouble
-codes and the VIN from a vehicle, monitor values over time, and pass raw commands to the adapter. A
+Tools and a library for ELM327 OBD-II adapters on Linux, Windows, macOS, Android and iOS. They read
+live values, trouble codes and the VIN from a vehicle, monitor values over time, and pass raw commands to the adapter. A
 [read-only mode](#read-only-mode) makes the tools safe to leave connected to a car: it refuses, before
 sending, anything that could change the vehicle. An [expert mode](#expert-mode-uds-kwp-and-coding)
 adds UDS/KWP requests for the manufacturer-specific diagnostics and coding that tools such as VCDS,
@@ -19,8 +19,8 @@ The project has two parts:
     command, it runs that command once, for scripts.
   - **`elm327gui`**, a graphical front-end drawn with [Dear ImGui](https://github.com/ocornut/imgui):
     live data with plots, or in widget mode as the gauges of a classic car dashboard; trouble
-    codes, the VIN, and a terminal for AT commands. On Android it is an app that connects to a
-    paired Bluetooth adapter (see [Android](#android)).
+    codes, the VIN, and a terminal for AT commands. On Android and iOS it is an app that connects
+    to a Bluetooth or Wi-Fi adapter (see [Android](#android) and [iOS](#ios)).
 
 `elm327sim` simulates an adapter and a vehicle on a pseudo-terminal (on Windows, a named pipe), to
 try everything without hardware.
@@ -57,6 +57,14 @@ For the Android app, with the Android SDK and NDK (see [Building for Android](#b
 cd android && ./gradlew assembleDebug   # app/build/outputs/apk/debug/app-debug.apk
 ```
 
+On a Mac, the tools and the iOS app (see [Building for macOS and iOS](#building-for-macos-and-ios)):
+
+```bash
+brew install ninja glfw
+cmake --preset macos-release && cmake --build --preset macos-release
+cmake --preset ios && open build/ios/elm327controller.xcodeproj   # then run the app from Xcode
+```
+
 If the repository was cloned without `--recurse-submodules`, run `git submodule update --init`.
 
 No adapter at hand? `elm327sim` simulates one on a pseudo-terminal, connected to a car that keeps
@@ -79,7 +87,8 @@ build\msvc-release\gui\elm327gui.exe -d \\.\pipe\elm327sim-4242-0 --monitor 0C,0
 ```
 
 `elm327sim --legacy` simulates an ISO 9141-2 car instead of a CAN car, `--ignition-off` a car that
-does not answer, and `--slow` the reset and protocol-search times of a real adapter.
+does not answer, `--slow` the reset and protocol-search times of a real adapter, and `--tcp` (not on
+Windows) an adapter on Wi-Fi, on a TCP port: `elm327ctl -d tcp:127.0.0.1:<port>`.
 
 ## The interactive shell
 
@@ -484,12 +493,36 @@ keyboard.
   is 1234 or 0000). The list next to the device field shows the paired devices; the app starts
   with the first whose name contains OBD or ELM. On Android 12 and later it asks for the
   permission to connect to nearby devices. It does not scan, so it needs no location.
+- **Wi-Fi adapters**: join the adapter's Wi-Fi network, then choose "Wi-Fi adapter" in the list,
+  `tcp:192.168.0.10:35000`, the address of most; type another one into the device field.
 - **Simulator**: the same list offers the simulator, the car of `elm327sim` inside the app, so the
   app can be tried without a car. It calls itself "ELM327 v1.5 (simulator)" in the connection bar.
 - **Your feature definitions** go into `features.ini` in `Android/data/io.github.emrebalci.elm327controller/files`
   on the phone's shared storage, which a computer reaches over USB. `backups.txt` is written there.
 
-Bluetooth Low Energy, Wi-Fi and USB adapters are not supported yet (see [Next steps](#next-steps)).
+Bluetooth Low Energy and USB adapters are not supported yet (see [Next steps](#next-steps)).
+
+## iOS
+
+The app is `elm327gui` with the same window and tabs, for iPhones and iPads with iOS 15 or later.
+It runs in landscape on a phone, keeps clear of the notch and the home indicator, and keeps the
+screen on while it is connected. Text fields bring up the keyboard.
+
+Apple keeps the Bluetooth (classic) adapters most ELM327 clones are from apps: an iPhone needs an
+adapter on Wi-Fi or with Bluetooth Low Energy.
+
+- **Wi-Fi adapters**: join the adapter's Wi-Fi network in the Settings, then connect: the app
+  starts with `tcp:192.168.0.10:35000`, the address of most. iOS asks once for the permission to
+  use the local network.
+- **Bluetooth Low Energy adapters** (e.g. Vgate iCar Pro BLE, OBDLink CX, Veepeak BLE): open the
+  list next to the device field, which looks for them while it is open; iOS asks once for the
+  permission to use Bluetooth. They need no pairing in the Settings.
+- **Simulator**: the same list offers the simulator, as on Android.
+- **Your feature definitions** go into `features.ini` in the app's folder in the Files app, where
+  `backups.txt` is written too.
+
+The iOS app has not run on a device yet: it was written without a Mac (see
+[Building for macOS and iOS](#building-for-macos-and-ios)).
 
 ## Connecting an adapter
 
@@ -503,8 +536,13 @@ Bluetooth Low Energy, Wi-Fi and USB adapters are not supported yet (see [Next st
   program has open is reported as in use.
 - Most adapters talk at 38400 bit/s, the default. If the adapter does not answer, try 9600 or
   115200 (`-b`, `set baud`, or the Baud list of the GUI).
+- An adapter on Wi-Fi is its own access point, usually at 192.168.0.10, port 35000: join its
+  network, then use the device `tcp:192.168.0.10:35000` (Linux, macOS, Android, iOS; not on Windows
+  yet). Only numeric addresses work.
+- On macOS a USB adapter is `/dev/cu.usbserial-<serial number>` (FTDI) or
+  `/dev/cu.wchusbserial<number>` (CH340); the device list of the GUI shows them.
 - On Android, pair a Bluetooth adapter in the settings and choose it in the app; see
-  [Android](#android).
+  [Android](#android). On iOS, use a Wi-Fi or Bluetooth Low Energy adapter; see [iOS](#ios).
 - WSL does not see USB devices by default. Attach the adapter with
   [usbipd-win](https://github.com/dorssel/usbipd-win): in an administrator PowerShell, `usbipd list`,
   then `usbipd bind --busid <id>` once and `usbipd attach --wsl --busid <id>`.
@@ -518,10 +556,10 @@ Bluetooth Low Energy, Wi-Fi and USB adapters are not supported yet (see [Next st
 
 | Layer | Where | What it does |
 |---|---|---|
-| Adapter | `elm327/adapter/` | `Adapter` sends a command over the serial port (or a connected stream socket, `open_stream()`) and collects the reply lines up to the `>` prompt, within a deadline and cancellable through a descriptor. After a command was interrupted, the next one waits for its late reply or stops the adapter, so a program can go on after Ctrl+C. `Response` classifies the lines (`OK`, `NO DATA`, `UNABLE TO CONNECT`, `CAN ERROR`, ...). |
+| Adapter | `elm327/adapter/` | `Adapter` sends a command over the serial port (or to an adapter on Wi-Fi, `tcp:<address>:<port>`, or over a connected stream socket, `open_stream()`) and collects the reply lines up to the `>` prompt, within a deadline and cancellable through a descriptor. After a command was interrupted, the next one waits for its late reply or stops the adapter, so a program can go on after Ctrl+C. `Response` classifies the lines (`OK`, `NO DATA`, `UNABLE TO CONNECT`, `CAN ERROR`, ...). |
 | OBD-II | `elm327/obd/` | `parse_messages()` turns reply lines into vehicle messages, including CAN multi-frame replies. `pid.hpp` names and decodes the service 01 PIDs exactly, `dtc.hpp` and `vin.hpp` decode trouble codes and the VIN in the CAN and the older formats. `ObdClient` runs the requests (and `clear_dtcs()`, service 04). `service.hpp` classifies a request as read or write for the read-only gate. |
 | Expert | `elm327/expert/` | `uds.hpp` builds and decodes UDS (ISO 14229) and KWP2000 requests -- session control, read/write data by identifier, routine control, security access, ECU reset, tester present -- and names the negative response codes. `decode_uds_response()` turns the adapter's reply, multi-frame included, into a `UdsExchange` that owns its bytes; both front-ends use it. `feature.hpp` reads [feature definitions](#adding-features-for-your-car) and `FeatureCoder` turns a feature on and off safely: identification and length checks, backup, session, write, verification, restore. `coding.hpp` is a reference map of common owner codings for VAG, Renault and BMW (no car-specific values). |
-| Controller | `elm327/controller/` | `Controller` keeps a connection: it opens and initializes the adapter in one step and tells which step failed (a front-end's `LinkOpener` opens devices that are not serial devices, e.g. the Android app's Bluetooth links), reads the supported PIDs once, notices an unplugged device, and returns PID values that own their bytes. Its access policy enforces [read-only mode](#read-only-mode) on every write. `explain.hpp` puts failures into words, `signals.hpp` stops a program cleanly on Ctrl+C, and `timing.hpp` schedules periodic reads without drift. |
+| Controller | `elm327/controller/` | `Controller` keeps a connection: it opens and initializes the adapter in one step and tells which step failed (a front-end's `LinkOpener` opens devices that are not serial devices, e.g. the apps' Bluetooth links, which `bridged_link.hpp` makes through another runtime), reads the supported PIDs once, notices an unplugged device, and returns PID values that own their bytes. Its access policy enforces [read-only mode](#read-only-mode) on every write. `explain.hpp` puts failures into words, for each kind of device, `signals.hpp` stops a program cleanly on Ctrl+C, `event.hpp` makes descriptors that cancel and wake up, and `timing.hpp` schedules periodic reads without drift. |
 
 A program uses it like this:
 
@@ -574,8 +612,9 @@ the result once, half to even, to the resolution of the PID, so `(256 * A + B) /
 | GUI worker | `gui/worker.hpp` | `Worker` owns the `Controller` on its own thread. The window posts requests through an `SpscQueue`; the worker publishes a `State` snapshot through a `TripleBuffer`, and PID samples, the traffic, the results of expert mode (`UdsResult`) and of the Features tab (`FeatureResult`) through four more queues. Nobody waits for anybody; `cancel()` interrupts the operation in progress. |
 | GUI window | `gui/app.hpp`, `gui/main.cpp` | `App` draws the State with ImGui each frame and turns clicks into requests. `main.cpp` sets up GLFW and the OpenGL 3 backend, and redraws on input, on a result of the worker, or 30 times per second while it works. |
 | Android app | `android/`, `gui/main_android.cpp`, `gui/android_bridge.hpp` | `MainActivity` (Java) is a `NativeActivity`, and `main_android.cpp` draws the same `App` on OpenGL ES 3 in its window. `android_bridge.hpp` reaches what only Java can: the paired Bluetooth devices, the links to them, the on-screen keyboard and the insets of the window. A link is a socket pair: `MainActivity` connects a `BluetoothSocket` and copies the bytes between it and one end, and the `Adapter` reads and writes the other end. |
+| iOS app | `gui/main_ios.mm`, `gui/ios_bridge.hpp`, `gui/ios/` | `main_ios.mm` (UIKit with a scene, MetalKit) draws the same `App` on Metal and turns touches and the keyboard into ImGui's input. `ios_bridge.mm` finds Bluetooth Low Energy adapters with Core Bluetooth and links one to a socket pair, as on Android. `gui/ios/` holds the `Info.plist` and the app icon. |
 | Widget mode | `gui/gauge.hpp`, `gui/dashboard.hpp` | `gauge.hpp` knows which PIDs suit a dial and the scale of each (range, ticks, zones, words such as E and F), the geometry of needle and ticks, and plans the layout of a dashboard; it does not draw, so the tests cover it. `Dashboard` draws the dials and the digital displays with ImGui's draw lists, and moves each needle smoothly toward its value. |
-| Simulator | `sim/` | `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal (on Windows, a named pipe; or a socket pair): the fixture of the tests and the core of `elm327sim`. `demo.hpp` drives its car, for `elm327sim` and as the demo device of the Android app. |
+| Simulator | `sim/` | `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal (on Windows, a named pipe; or a socket pair, or a TCP port like a Wi-Fi adapter): the fixture of the tests and the core of `elm327sim`. `demo.hpp` drives its car, for `elm327sim` and as the demo device of the apps. |
 
 ## Building and testing
 
@@ -646,6 +685,45 @@ The programs take UTF-8 arguments, e.g. file paths, through a manifest that make
 page. The serial port is Common's `SerialPort`, with overlapped I/O that ends at the deadline; the
 adapter's reads end at the cancel event too.
 
+### Building for macOS and iOS
+
+On a Mac with the Xcode command line tools, CMake 3.21 or later, Ninja and GLFW (`brew install
+ninja glfw`), the presets `macos-debug` and `macos-release` build everything but the apps, and the
+tests run as on Linux:
+
+```bash
+cmake --preset macos-debug && cmake --build --preset macos-debug && ctest --preset macos-debug
+```
+
+The iOS app needs Xcode. The `ios` preset makes an Xcode project for iOS 15 and later on devices
+(arm64); open it, choose your team under *Signing & Capabilities* (or configure with
+`-DCMAKE_XCODE_ATTRIBUTE_DEVELOPMENT_TEAM=<your team ID>`), and run the `elm327gui` target on an
+iPhone or iPad:
+
+```bash
+cmake --preset ios
+open build/ios/elm327controller.xcodeproj
+```
+
+This support was written without a Mac. The code macOS and iOS share with Linux takes portable
+POSIX calls where Linux has its own (pipes for eventfd and signalfd, `poll` for `ppoll`), and the
+`portable` preset runs all the tests on Linux with exactly that code
+(`COMMON_PORTABLE_POSIX`, under AddressSanitizer and UndefinedBehaviorSanitizer). What only Apple
+has (the Objective-C++ of the iOS app with UIKit, Metal and Core Bluetooth; `SO_NOSIGPIPE`; the
+OpenGL 3.2 context of the macOS GUI) has not been compiled yet. Until it is warning-free in Xcode,
+the iOS app's Objective-C++ does not fail the build on warnings. The workflow
+`.github/workflows/apple.yml` builds and tests all of it on a Mac runner when started by hand.
+
+### What differs on macOS and iOS
+
+| | Linux | macOS | iOS |
+|---|---|---|---|
+| Serial device | `/dev/ttyUSB0` | `/dev/cu.usbserial-<serial>`, `/dev/cu.wchusbserial<n>` | none: Wi-Fi (`tcp:...`) or Bluetooth Low Energy (`ble:<identifier>`, through Core Bluetooth) |
+| GUI | GLFW and OpenGL 3 | GLFW and OpenGL 3.2 (core profile) | UIKit and Metal, an app bundle (`gui/main_ios.mm`) |
+| Stop requests, event descriptors | signalfd, eventfd | a signal handler writing into a pipe; pipes | as on macOS |
+| GUI's configuration | `~/.config/elm327controller` | the same | the app's Documents, in the Files app |
+| Waits | `ppoll` | `poll`, in whole milliseconds rounded up | as on macOS |
+
 ### Building for Android
 
 Requires the Android SDK with the NDK r29 (Android Studio installs both), and JDK 17 or later. The
@@ -697,9 +775,9 @@ through a descriptor.
 
 The GUI's own code (`gui/`) follows the same rules, and its worker is part of the tests, but Dear
 ImGui and GLFW allocate on the heap and are compiled without this project's checks; the plots
-convert the exact values to `float` for drawing only. On Android it reaches Java through JNI, and
-the app's Java code (`android/`) and its demo device, the simulator, are outside the compliance
-scope. The simulator and the tests use
+convert the exact values to `float` for drawing only. On Android it reaches Java through JNI. The
+apps' Java code (`android/`), the iOS app's Objective-C++ (`gui/*.mm`, with Cocoa's objects), and
+their demo device, the simulator, are outside the compliance scope. The simulator and the tests use
 `std::string`, `std::thread` and `<cstdio>` and are outside the compliance scope, like Common's
 tests and examples.
 
@@ -730,12 +808,14 @@ git commit -m "Update Dear ImGui to 1.93.0"
 - Freeze-frame data (service 02) and the readiness monitors of PID 01.
 - Headers on (`ATH1`), to tell which ECU answered.
 - Faster monitoring: several PIDs per request on CAN, and the expected reply count after a request.
-- Baud-rate detection, and adapters over TCP (Wi-Fi).
+- Baud-rate detection, and Wi-Fi adapters on Windows (Winsock).
 - Trying the Windows build with real USB and Bluetooth adapters: the tests reach its I/O through
   the simulator's named pipe, not through a COM port.
 - Trying the Android app with real Bluetooth adapters: the tests reach the stream I/O through the
   simulator's socket pair, and the Java side was built and linted but not run on a phone here.
-- Adapters with Bluetooth Low Energy, Wi-Fi or USB (OTG) in the Android app, and remembering the
-  last adapter.
+- Adapters with Bluetooth Low Energy or USB (OTG) in the Android app, and remembering the last
+  adapter in both apps.
+- Building the macOS and iOS code on a Mac (`.github/workflows/apple.yml`), making the iOS app's
+  Objective-C++ warning-free, and trying the app with Wi-Fi and Bluetooth Low Energy adapters.
 - CSV output for `monitor`, and recording from the GUI.
 - A persistent history for the shell.

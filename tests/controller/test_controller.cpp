@@ -1,4 +1,7 @@
 #include <signal.h>
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
 
 #include <array>
 #include <chrono>
@@ -6,6 +9,7 @@
 #include <cstdint>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "common/core/status.hpp"
@@ -13,6 +17,7 @@
 #include "common/time/deadline.hpp"
 #include "elm327/adapter/adapter.hpp"
 #include "elm327/adapter/response.hpp"
+#include "elm327/controller/bridged_link.hpp"
 #include "elm327/controller/controller.hpp"
 #include "elm327/controller/explain.hpp"
 #include "elm327/controller/signals.hpp"
@@ -56,6 +61,43 @@ std::string reason_of(const elm327::Explanation& explanation) {
 }
 
 #if !defined(_WIN32)
+/// A runtime for open_bridged_link(): answers after a while, or never, and keeps the end it got.
+struct Runtime final {
+    int answer{0};  ///< The status byte; -1 closes the end without one, -2 never answers.
+    std::chrono::milliseconds delay{0};
+    std::string address{};
+    int end{-1};
+    std::thread thread{};
+
+    ~Runtime() {
+        if (thread.joinable()) {
+            thread.join();
+        }
+        if (end >= 0) {
+            static_cast<void>(::close(end));
+        }
+    }
+};
+
+void hand_to_runtime(const char* const address, const common::NativeHandle end, void* const context) noexcept {
+    Runtime* const runtime{static_cast<Runtime*>(context)};
+    runtime->address = address;
+    runtime->end = end;
+    runtime->thread = std::thread{[runtime]() {
+        std::this_thread::sleep_for(runtime->delay);
+        if (runtime->answer >= 0) {
+            const std::uint8_t byte{static_cast<std::uint8_t>(runtime->answer)};
+            const ssize_t written{::write(runtime->end, &byte, 1U)};
+            static_cast<void>(written);
+        } else if (runtime->answer == -1) {
+            static_cast<void>(::close(runtime->end));
+            runtime->end = -1;
+        } else {
+            // Never answers.
+        }
+    }};
+}
+
 /// The links of a LinkOpener for the tests: "sim" is the simulator's socket, "bt:..." fails with
 /// failure, and anything else is a serial device.
 struct Links final {
@@ -211,13 +253,8 @@ TEST_CASE(controller_connect_failures) {
     CHECK(controller.connect(settings) == common::Status::kNotFound);
     CHECK(controller.connect_failure() == elm327::ConnectFailure::kOpen);
     CHECK(!controller.connected());
-#if defined(__ANDROID__)
-    CHECK(reason_of(elm327::explain_connect_failure(controller.connect_failure(), common::Status::kNotFound)) ==
-          "no such device (pair the adapter in the Bluetooth settings first)");
-#else
     CHECK(reason_of(elm327::explain_connect_failure(controller.connect_failure(), common::Status::kNotFound)) ==
           "no such device (choose the adapter's serial device)");
-#endif
 
     REQUIRE(settings.device.assign(test::kNotSerialDevice));
     CHECK(controller.connect(settings) == common::Status::kInvalidArgument);
@@ -306,6 +343,68 @@ TEST_CASE(controller_opens_links) {
 }
 #endif
 
+#if !defined(_WIN32)
+TEST_CASE(bridged_links) {
+    {
+        Runtime runtime{};
+        runtime.delay = 20ms;
+        const common::Result<common::NativeHandle> link{
+            elm327::open_bridged_link("00:1D:A5:68:98:8B", &hand_to_runtime, &runtime, common::Deadline::after(2s),
+                                      common::kInvalidNativeHandle)};
+        REQUIRE(link.has_value());
+        runtime.thread.join();
+        CHECK(runtime.address == "00:1D:A5:68:98:8B");
+        // From now on the bytes pass, both ways.
+        const char hello{'>'};
+        CHECK(::write(runtime.end, &hello, 1U) == 1);
+        char received{'\0'};
+        CHECK(::read(link.value(), &received, 1U) == 1);
+        CHECK(received == '>');
+        static_cast<void>(::close(link.value()));
+    }
+    const std::array<std::pair<int, common::Status>, 5U> answers{{
+        {1, common::Status::kNotFound},
+        {2, common::Status::kPermissionDenied},
+        {3, common::Status::kNotRunning},
+        {4, common::Status::kDisconnected},
+        {-1, common::Status::kDisconnected},  // Closed without an answer.
+    }};
+    for (const auto& [answer, status] : answers) {
+        Runtime runtime{};
+        runtime.answer = answer;
+        CHECK(elm327::open_bridged_link("addr", &hand_to_runtime, &runtime, common::Deadline::after(2s),
+                                        common::kInvalidNativeHandle)
+                  .status() == status);
+    }
+    {
+        Runtime runtime{};
+        runtime.answer = -2;
+        CHECK(elm327::open_bridged_link("addr", &hand_to_runtime, &runtime, common::Deadline::after(50ms),
+                                        common::kInvalidNativeHandle)
+                  .status() == common::Status::kTimeout);
+        runtime.thread.join();
+        // The runtime finds the link closed when it gives up.
+        char byte{'\0'};
+        CHECK(::read(runtime.end, &byte, 1U) == 0);
+    }
+    {
+        Runtime runtime{};
+        runtime.answer = -2;
+        test::Event cancel{};
+        REQUIRE(cancel.valid());
+        cancel.signal();
+        const common::TimePoint start{common::MonotonicClock::now()};
+        CHECK(elm327::open_bridged_link("addr", &hand_to_runtime, &runtime, common::Deadline::after(5s),
+                                        cancel.descriptor())
+                  .status() == common::Status::kInterrupted);
+        CHECK((common::MonotonicClock::now() - start) < 1s);
+    }
+    CHECK(elm327::open_bridged_link(nullptr, &hand_to_runtime, nullptr, common::Deadline::after(1s),
+                                    common::kInvalidNativeHandle)
+              .status() == common::Status::kInvalidArgument);
+}
+#endif
+
 TEST_CASE(controller_explanations) {
     const elm327::Response none{};
     CHECK(reason_of(elm327::explain_failure(common::Status::kInterrupted, none)) == "interrupted");
@@ -313,21 +412,39 @@ TEST_CASE(controller_explanations) {
     CHECK(reason_of(elm327::explain_failure(common::Status::kInvalidArgument, none)) == "unexpected reply");
     const elm327::Response bus{test::make_response({"SEARCHING...", "CAN ERROR"})};
     CHECK(reason_of(elm327::explain_failure(common::Status::kSystemError, bus)) == "CAN ERROR");
-#if defined(_WIN32)
-    CHECK(reason_of(elm327::explain_open_failure(common::Status::kPermissionDenied)) == "permission denied");
-#elif defined(__ANDROID__)
-    // The device is a Bluetooth link.
-    CHECK(reason_of(elm327::explain_open_failure(common::Status::kPermissionDenied)) ==
-          "permission denied (allow the app to connect to nearby devices)");
-    CHECK(reason_of(elm327::explain_open_failure(common::Status::kNotRunning)) ==
-          "Bluetooth is off (turn Bluetooth on)");
-    CHECK(reason_of(elm327::explain_open_failure(common::Status::kTimeout)) ==
-          "the adapter does not accept the connection (is it plugged in, and no other device connected to it?)");
-#else
+#if defined(__linux__) && !defined(__ANDROID__)
     CHECK(reason_of(elm327::explain_open_failure(common::Status::kPermissionDenied)) ==
           "permission denied (add your user to the dialout group)");
-    CHECK(reason_of(elm327::explain_open_failure(common::Status::kTimeout)) == "timed out");
+#else
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kPermissionDenied)) == "permission denied");
 #endif
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kTimeout)) == "timed out");
+
+    // Each kind of device in its own words.
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kNotFound, "/dev/ttyUSB0")) ==
+          "no such device (choose the adapter's serial device)");
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kInvalidArgument, "tcp:obd:35000")) ==
+          "not an IP address and port (e.g. tcp:192.168.0.10:35000)");
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kTimeout, "tcp:192.168.0.10:35000")) ==
+          "nothing answers at that address (join the adapter's Wi-Fi network first)");
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kDisconnected, "tcp:192.168.0.10:35000")) ==
+          "nothing answers at that address (join the adapter's Wi-Fi network first)");
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kNotFound, "bt:00:1D:A5:68:98:8B")) ==
+          "no such device (pair the adapter in the Bluetooth settings first)");
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kNotRunning, "ble:6B1F")) ==
+          "Bluetooth is off (turn Bluetooth on)");
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kDisconnected, "bt:00:1D:A5:68:98:8B")) ==
+          "the adapter does not accept the connection (is it plugged in, and no other device connected to it?)");
+#if defined(__APPLE__)
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kPermissionDenied, "ble:6B1F")) ==
+          "permission denied (allow the app to use Bluetooth in the Settings)");
+#else
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kPermissionDenied, "bt:00:1D:A5:68:98:8B")) ==
+          "permission denied (allow the app to connect to nearby devices)");
+#endif
+    CHECK(reason_of(elm327::explain_connect_failure(elm327::ConnectFailure::kOpen, common::Status::kTimeout,
+                                                    "tcp:192.168.0.10:35000")) ==
+          "nothing answers at that address (join the adapter's Wi-Fi network first)");
     CHECK(reason_of(elm327::explain_open_failure(common::Status::kResourceLimit)) == "in use by another program");
     CHECK(reason_of(elm327::explain_open_failure(common::Status::kNotSupported)) ==
           "the device does not accept the line settings");

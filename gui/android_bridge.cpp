@@ -2,19 +2,15 @@
 
 #include <android/native_activity.h>
 #include <jni.h>
-#include <poll.h>
-#include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 
-#include <array>
 #include <atomic>
-#include <cerrno>
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
 
-#include "common/time/clock.hpp"
+#include "elm327/controller/bridged_link.hpp"
+#include "elm327/controller/controller.hpp"
 #include "sim/demo.hpp"
 
 namespace {
@@ -24,15 +20,6 @@ namespace {
 constexpr jint kStateReady{0};
 constexpr jint kStateOff{2};
 constexpr jint kStateNoPermission{3};
-
-/// The status byte that MainActivity answers on a link; in step with BluetoothLink.java.
-constexpr std::uint8_t kLinkConnected{0U};
-constexpr std::uint8_t kLinkNotFound{1U};
-constexpr std::uint8_t kLinkNoPermission{2U};
-constexpr std::uint8_t kLinkOff{3U};
-
-/// Waits of open_link() for the status byte: one, unless a signal handler interrupts it.
-constexpr std::uint32_t kMaxLinkWaits{100U};
 
 /// The activity and the methods of MainActivity, found by begin().
 struct Java final {
@@ -82,67 +69,10 @@ bool copy_string(JNIEnv* const env, const jstring text, common::StaticString<Cap
     return copied;
 }
 
-timespec to_relative_timespec(const common::Duration duration) noexcept {
-    const std::int64_t ns{duration.count()};
-    timespec ts{};
-    ts.tv_sec = ns / common::MonotonicClock::kNanosPerSecond;
-    ts.tv_nsec = ns % common::MonotonicClock::kNanosPerSecond;
-    return ts;
-}
-
-/// Waits for the status byte of MainActivity on @p link, at most until @p deadline or until
-/// @p cancel is readable. @return kOk once connected; otherwise why not, see open_link().
-common::Status wait_for_link(const int link, const common::NativeHandle cancel,
-                             const common::Deadline& deadline) noexcept {
-    common::Status status{common::Status::kTimeout};
-    bool waiting{true};
-    for (std::uint32_t wait{0U}; waiting && (wait < kMaxLinkWaits); ++wait) {
-        std::array<pollfd, 2U> entries{};
-        entries[0U].fd = link;
-        entries[0U].events = POLLIN;
-        entries[1U].fd = cancel;  // poll() skips a negative descriptor.
-        entries[1U].events = POLLIN;
-        timespec timeout{};
-        const timespec* timeout_pointer{nullptr};
-        if (!deadline.is_never()) {
-            timeout = to_relative_timespec(deadline.remaining());
-            timeout_pointer = &timeout;
-        }
-        const int ready{::ppoll(entries.data(), entries.size(), timeout_pointer, nullptr)};
-        waiting = (ready < 0) && (errno == EINTR);
-        if (waiting) {
-            // A signal handler ran: wait again.
-        } else if (ready < 0) {
-            status = common::Status::kSystemError;
-        } else if (ready == 0) {
-            status = common::Status::kTimeout;
-        } else if (static_cast<std::uint32_t>(entries[1U].revents) != 0U) {
-            status = common::Status::kInterrupted;
-        } else {
-            std::uint8_t answer{kLinkConnected};
-            const ssize_t count{::read(link, &answer, 1U)};
-            if (count != 1) {
-                status = common::Status::kDisconnected;  // MainActivity closed the link.
-            } else if (answer == kLinkConnected) {
-                status = common::Status::kOk;
-            } else if (answer == kLinkNotFound) {
-                status = common::Status::kNotFound;
-            } else if (answer == kLinkNoPermission) {
-                status = common::Status::kPermissionDenied;
-            } else if (answer == kLinkOff) {
-                status = common::Status::kNotRunning;
-            } else {
-                status = common::Status::kDisconnected;  // The adapter refused the connection.
-            }
-        }
-    }
-    return status;
-}
-
-/// Asks MainActivity to connect to the Bluetooth adapter at @p address and to link it to @p link,
-/// one end of a socket pair, which MainActivity owns from then on. Runs on the worker's thread,
-/// which is attached to Java for the call.
-void connect_bluetooth(const char* const address, const int link) noexcept {
+/// The LinkHandOver of open_bridged_link(): asks MainActivity to connect to the Bluetooth adapter at
+/// @p address and to link it to @p link, one end of the socket pair, which MainActivity owns from
+/// then on. Runs on the worker's thread, which is attached to Java for the call.
+void connect_bluetooth(const char* const address, const common::NativeHandle link, void* const /*context*/) noexcept {
     JavaVM* const vm{g_java.activity->vm};
     JNIEnv* env{nullptr};
     if (vm->AttachCurrentThread(&env, nullptr) == JNI_OK) {
@@ -298,23 +228,11 @@ common::Result<common::NativeHandle> open_link(const char* const device, const c
         result = (stream >= 0) ? LinkResult::success(stream) : LinkResult::failure(common::Status::kResourceLimit);
     } else if ((name.size() > kBluetoothPrefix.size()) &&
                (std::string_view{name.data(), kBluetoothPrefix.size()} == kBluetoothPrefix)) {
-        std::array<int, 2U> ends{{-1, -1}};
-        if (g_java.bluetooth_state == nullptr) {
-            result = LinkResult::failure(common::Status::kNotSupported);
-        } else if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, ends.data()) != 0) {
-            result = LinkResult::failure(common::Status::kResourceLimit);
-        } else {
-            // The address follows the prefix, up to the end of the device.
-            connect_bluetooth(&device[kBluetoothPrefix.size()], ends[1U]);
-            const common::Status status{wait_for_link(ends[0U], cancel, deadline)};
-            if (is_ok(status)) {
-                result = LinkResult::success(ends[0U]);
-            } else {
-                // MainActivity finds the link closed and drops the Bluetooth connection.
-                static_cast<void>(::close(ends[0U]));
-                result = LinkResult::failure(status);
-            }
-        }
+        // A Bluetooth adapter.
+        // The address follows the prefix, up to the end of the device.
+        result = (g_java.bluetooth_state != nullptr)
+                     ? open_bridged_link(&device[kBluetoothPrefix.size()], &connect_bluetooth, nullptr, deadline, cancel)
+                     : LinkResult::failure(common::Status::kNotSupported);
     } else {
         // Not a link: a serial device, e.g. a pseudo-terminal.
     }

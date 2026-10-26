@@ -4,9 +4,11 @@
 #include <windows.h>
 #else
 #include <poll.h>
-#include <time.h>
 
+#include <array>
 #include <cerrno>
+
+#include "detail/poll_until.hpp"
 #endif
 
 #include <cstdint>
@@ -36,14 +38,6 @@ DWORD wait_milliseconds(const common::Deadline& deadline) noexcept {
                                                                          : kMaxWaitMilliseconds;
     }
     return milliseconds;
-}
-#else
-timespec to_relative_timespec(const common::Duration duration) noexcept {
-    const std::int64_t ns{duration.count()};
-    timespec ts{};
-    ts.tv_sec = ns / common::MonotonicClock::kNanosPerSecond;
-    ts.tv_nsec = ns % common::MonotonicClock::kNanosPerSecond;
-    return ts;
 }
 #endif
 
@@ -89,16 +83,10 @@ common::Status wait_until(const common::NativeHandle descriptor, const common::D
     common::Status status{common::Status::kSystemError};
     bool done{false};
     for (std::uint32_t round{0U}; (!done) && (round < kMaxWaitRounds); ++round) {
-        pollfd entry{};
-        entry.fd = descriptor;  // poll() skips a negative descriptor.
-        entry.events = POLLIN;
-        timespec timeout{};
-        const timespec* timeout_pointer{nullptr};
-        if (!deadline.is_never()) {
-            timeout = to_relative_timespec(deadline.remaining());
-            timeout_pointer = &timeout;
-        }
-        const int ready{::ppoll(&entry, 1U, timeout_pointer, nullptr)};
+        std::array<pollfd, 1U> entries{};
+        entries[0U].fd = descriptor;  // poll() skips a negative descriptor.
+        entries[0U].events = POLLIN;
+        const int ready{detail::poll_until(entries, deadline)};
         done = true;
         if (ready > 0) {
             status = common::Status::kInterrupted;

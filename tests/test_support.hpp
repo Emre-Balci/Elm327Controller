@@ -16,6 +16,7 @@
 #include "common/containers/span.hpp"
 #include "common/core/config.hpp"
 #include "elm327/adapter/response.hpp"
+#include "elm327/controller/event.hpp"
 
 namespace test {
 
@@ -29,32 +30,33 @@ inline constexpr const char* kMissingDevice{"/nonexistent/ttyUSB9"};
 inline constexpr const char* kNotSerialDevice{"/dev/null"};
 #endif
 
-/// An eventfd (on Windows, a manual-reset event) that becomes readable once signal() is called: a
-/// cancel descriptor for the tests.
+/// An elm327::Event, open from the start, that becomes readable once signal() is called: a cancel
+/// descriptor for the tests.
 class Event final {
 public:
-    Event();
-    ~Event();
-    Event(const Event&) = delete;
-    Event& operator=(const Event&) = delete;
-    Event(Event&&) = delete;
-    Event& operator=(Event&&) = delete;
+    Event() {
+        static_cast<void>(event_.open());
+    }
 
     [[nodiscard]] bool valid() const {
-        return descriptor_ != common::kInvalidNativeHandle;
+        return event_.is_open();
     }
 
     [[nodiscard]] common::NativeHandle descriptor() const {
-        return descriptor_;
+        return event_.descriptor();
     }
 
-    void signal() const;
+    void signal() const {
+        event_.signal();
+    }
 
     /// Makes the descriptor unreadable again, as an interactive program does before it goes on.
-    void clear() const;
+    void clear() const {
+        event_.clear();
+    }
 
 private:
-    common::NativeHandle descriptor_{common::kInvalidNativeHandle};
+    elm327::Event event_{};
 };
 
 /// A file in memory (on Windows, a temporary file that is deleted when it is closed) for a Console

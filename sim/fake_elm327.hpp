@@ -90,6 +90,9 @@ struct Behaviour final {
 enum class Transport : std::uint8_t {
     kDevice,  ///< A pseudo-terminal (on Windows, a named pipe) that programs open by device_path().
     kSocket,  ///< One end of a socket pair; take_stream() hands out the other one. Not on Windows.
+    /// A TCP port on 127.0.0.1, like an adapter on Wi-Fi: device_path() is "tcp:127.0.0.1:<port>".
+    /// It serves one connection at a time, as the pseudo-terminal does. Not on Windows.
+    kTcp,
 };
 
 class FakeElm327 final {
@@ -116,7 +119,7 @@ public:
 #endif
 
     /// The device to open, e.g. "/dev/pts/3"; on Windows "\\\\.\\pipe\\elm327sim-<process>-<n>".
-    /// "socket" for Transport::kSocket, which has no device.
+    /// "socket" for Transport::kSocket, which has no device; "tcp:127.0.0.1:<port>" for kTcp.
     [[nodiscard]] const std::string& device_path() const {
         return device_path_;
     }
@@ -137,6 +140,12 @@ public:
 
 private:
     void run();
+#if !defined(_WIN32)
+    /// Transport::kTcp: opens the listening socket.
+    void listen_tcp();
+    /// Transport::kTcp: waits a moment for a program to connect, and takes the connection.
+    void accept_connection();
+#endif
     void receive(const char* data, std::size_t size);
     void process(const std::string& received);
     std::vector<std::string> at_command(const std::string& command);
@@ -178,9 +187,10 @@ private:
     void* pipe_{nullptr};   ///< The HANDLE of the pipe's server end.
     void* event_{nullptr};  ///< The HANDLE of a manual-reset event for the overlapped I/O on it.
 #else
-    int master_{-1};  ///< The master side of the pseudo-terminal, or this end of the socket pair.
-    int stream_{-1};  ///< Transport::kSocket: the other end, until take_stream().
-    bool socket_{false};
+    int master_{-1};    ///< The master side of the pseudo-terminal, this end of the socket pair, or the connection.
+    int stream_{-1};    ///< Transport::kSocket: the other end, until take_stream().
+    int listener_{-1};  ///< Transport::kTcp: the listening socket.
+    bool socket_{false};  ///< Transport::kSocket or kTcp: written with send().
 #endif
     std::string device_path_{};
     std::atomic<bool> stop_{false};

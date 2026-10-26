@@ -18,15 +18,16 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * A Bluetooth adapter linked to the native side (gui/android_bridge.hpp): connects to it with the
- * serial port profile (RFCOMM), answers one status byte on the link, and then copies the bytes
- * between the two in both directions, until either side closes. Closing one closes the other.
+ * A Bluetooth adapter linked to the native side (gui/android_bridge.hpp; the bridged link of
+ * lib/include/elm327/controller/bridged_link.hpp): connects to it with the serial port profile
+ * (RFCOMM), answers one status byte on the link, and then copies the bytes between the two in both
+ * directions, until either side closes. Closing one closes the other.
  */
 final class BluetoothLink extends Thread {
     /** The serial port profile. */
     private static final UUID SERIAL_PORT = UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
-    // The status byte; in step with gui/android_bridge.cpp.
+    // The status byte: elm327::LinkAnswer (lib/include/elm327/controller/bridged_link.hpp).
     private static final int CONNECTED = 0;
     private static final int NOT_FOUND = 1;
     private static final int NO_PERMISSION = 2;

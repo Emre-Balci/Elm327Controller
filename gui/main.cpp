@@ -62,6 +62,8 @@ constexpr std::array<std::string_view, 25U> kUsage{{
     "Options:",
 #if defined(_WIN32)
     "  -d, --device PATH     serial device (default COM3)",
+#elif defined(__APPLE__)
+    "  -d, --device PATH     serial device, e.g. /dev/cu.usbserial-A50285BI",
 #else
     "  -d, --device PATH     serial device (default /dev/ttyUSB0)",
 #endif
@@ -100,6 +102,9 @@ constexpr float kWindowHeight{800.0F};
 #if defined(_WIN32)
 /// A font that looks better than ImGui's built-in one: Segoe UI, the font of Windows itself.
 constexpr const char* kFontPath{"C:\\Windows\\Fonts\\segoeui.ttf"};
+#elif defined(__APPLE__)
+/// A font that looks better than ImGui's built-in one, which macOS has.
+constexpr const char* kFontPath{"/System/Library/Fonts/Supplemental/Arial.ttf"};
 #else
 /// A font that looks better than ImGui's built-in one, when it is installed (fonts-dejavu-core).
 constexpr const char* kFontPath{"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"};
@@ -395,7 +400,14 @@ std::int32_t run_window(const Arguments& arguments, elm327::StopSignals& stop) n
     static_cast<void>(glfwSetErrorCallback(&report_glfw_error));
     if (glfwInit() == GLFW_TRUE) {
         glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+#if defined(__APPLE__)
+        // macOS offers OpenGL 3 only as a 3.2 core profile, which the backend's GLSL 150 suits.
+        glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+        glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+        glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+#else
         glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+#endif
         const float scale{ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor())};
         common::StaticString<64U> title{};
         static_cast<void>(title.append("elm327gui ") && title.append(elm327::kVersion));

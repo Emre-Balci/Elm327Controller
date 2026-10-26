@@ -19,20 +19,23 @@ add_library(elm327 STATIC
     src/obd/pid.cpp
     src/obd/service.cpp
     src/obd/vin.cpp)
-# The I/O of the adapter and the stop signals are mostly platform-specific: a <name>_posix.cpp and a
-# <name>_win32.cpp each.
+# The I/O of the adapter, event descriptors and the stop signals are mostly platform-specific: a
+# <name>_posix.cpp and a <name>_win32.cpp each.
 if(WIN32)
-    target_sources(elm327 PRIVATE src/adapter/adapter_win32.cpp src/controller/signals_win32.cpp)
+    target_sources(elm327 PRIVATE
+        src/adapter/adapter_win32.cpp src/controller/event_win32.cpp src/controller/signals_win32.cpp)
 else()
-    target_sources(elm327 PRIVATE src/adapter/adapter_posix.cpp src/controller/signals_posix.cpp)
+    target_sources(elm327 PRIVATE
+        src/adapter/adapter_posix.cpp src/adapter/tcp_link_posix.cpp src/controller/bridged_link_posix.cpp
+        src/controller/event_posix.cpp src/controller/signals_posix.cpp)
 endif()
 add_library(elm327::elm327 ALIAS elm327)
 
 configure_file(version.hpp.in "${CMAKE_CURRENT_BINARY_DIR}/generated/elm327/version.hpp" @ONLY)
 
-target_include_directories(elm327 PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/include"
-    "${CMAKE_CURRENT_BINARY_DIR}/generated")
+target_include_directories(elm327
+    PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/generated"
+    PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")  # Internal helpers: "detail/<name>.hpp".
 target_link_libraries(elm327
     PUBLIC common::common
     PRIVATE common::options)

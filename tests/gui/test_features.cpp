@@ -196,4 +196,15 @@ TEST_CASE(features_config_directory) {
     } else {
         CHECK(status == common::Status::kNotFound);
     }
+
+    // An app gives its own directory, which comes first; an empty one goes back to the system's.
+    REQUIRE(common::is_ok(elm327::gui::set_config_directory("/data/app/files")));
+    elm327::gui::Path given{};
+    CHECK(common::is_ok(elm327::gui::config_directory(given)));
+    CHECK(std::string{given.view()} == "/data/app/files");
+    CHECK(elm327::gui::set_config_directory(std::string(600U, 'x')) == common::Status::kOutOfRange);
+    REQUIRE(common::is_ok(elm327::gui::set_config_directory("")));
+    elm327::gui::Path again{};
+    CHECK(elm327::gui::config_directory(again) == status);
+    CHECK(again.view() == directory.view());
 }

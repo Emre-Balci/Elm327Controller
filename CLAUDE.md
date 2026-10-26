@@ -1,9 +1,9 @@
 # Elm327Controller — notes for Claude
 
-C++17 tools for ELM327 OBD-II adapters on Linux, Windows (MSVC) and Android, built on the Common
-library, in two parts: the static library `libelm327`, and the front-ends on it, `elm327ctl`
-(command line and interactive shell) and `elm327gui` (Dear ImGui; on Android, an app). See README.md
-for the commands, the layers and how Common is used.
+C++17 tools for ELM327 OBD-II adapters on Linux, Windows (MSVC), macOS, Android and iOS, built on the
+Common library, in two parts: the static library `libelm327`, and the front-ends on it, `elm327ctl`
+(command line and interactive shell) and `elm327gui` (Dear ImGui; on Android and iOS, an app). See
+README.md for the commands, the layers and how Common is used.
 
 ## Layout
 - `lib/`: the static library. Headers in `lib/include/elm327/<group>/`, sources in
@@ -15,8 +15,12 @@ for the commands, the layers and how Common is used.
   restore) and `coding.hpp` (a reference map for VAG/Renault/BMW, no car-specific values);
   `controller` holds `Controller`, the connection the front-ends share, with
   its `AccessPolicy` (the read-only safety mode, enforced in `execute()` and `clear_dtcs()`),
-  `explain.hpp` (failures in words), `signals.hpp` (`StopSignals`) and `timing.hpp` (periodic
-  reads). Logic both front-ends need belongs here.
+  `explain.hpp` (failures in words, by the kind of device), `signals.hpp` (`StopSignals`),
+  `event.hpp` (`Event`, the descriptor that cancels and wakes up), `bridged_link.hpp` (links through
+  another runtime, for the apps' Bluetooth) and `timing.hpp` (periodic reads). Wi-Fi adapters
+  (`tcp:<address>:<port>`) are a kind of device the `Adapter` opens itself (`tcp_link_posix.cpp`).
+  Internal helpers are in `lib/src/detail/` (`poll_until.hpp`). Logic both front-ends need belongs
+  here.
 - Read-only mode and expert mode: the gate lives in `obd/service.hpp` (`command_access()`,
   default-deny) and `Controller` (`set_access_policy()`), so every front-end -- `raw`, `clear`,
   `uds`, the GUI terminal -- is covered at one choke point. Expert mode is the UDS/KWP toolkit in
@@ -43,7 +47,9 @@ for the commands, the layers and how Common is used.
   `gauge` (also in `elm327gui_core`, no ImGui) holds the scale of every dial and plans the layout,
   so a new dial is a row in its table plus a test; `dashboard` draws them. On Android,
   `main_android` (the native activity's `android_main()`, OpenGL ES 3) replaces `main`, and
-  `android_bridge` is the JNI side of what only Java reaches (see Platforms).
+  `android_bridge` is the JNI side of what only Java reaches (see Platforms). On iOS, `main_ios.mm`
+  (UIKit with a scene, Metal) replaces it, `ios_bridge.mm` finds and links Bluetooth Low Energy
+  adapters with Core Bluetooth, and `gui/ios/` holds the `Info.plist` template and the icon.
 - `sim/`: `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal (on Windows, a named
   pipe, which `Adapter` opens in place of a COM port), and the `elm327sim` tool. It answers OBD-II
   (service 01/03/04/07/09/0A) and a subset of UDS (sessions, read/write data by identifier, routine,
@@ -54,8 +60,9 @@ for the commands, the layers and how Common is used.
   access). `did_value()` lets a test check what a write did, and that in read-only mode none
   arrived. Extend it whenever the library learns a new command, so the tests can cover it.
   `Transport::kSocket` serves on a socket pair instead, whose other end goes to
-  `Adapter::open_stream()`. `demo` drives the car of `elm327sim` and runs it as the Android app's
-  demo device (`start_demo()`).
+  `Adapter::open_stream()`, and `Transport::kTcp` on a TCP port, like a Wi-Fi adapter
+  (`elm327sim --tcp`). `demo` drives the car of `elm327sim` and runs it as the apps' demo device
+  (`start_demo()`).
 - `android/`: the Android app, a Gradle project (Kotlin DSL, Java sources) whose native code is the
   root `CMakeLists.txt` (target `elm327gui`, a shared library). `MainActivity` is the
   `NativeActivity`; `BluetoothLink` connects a paired adapter and copies between its
@@ -92,13 +99,22 @@ a manual-reset event on Windows, and `common::kInvalidNativeHandle` for none.
 - Keep the Linux behaviour unchanged when adding Windows code, and say in the header what differs.
 
 Android (API level 28+, 64-bit only, Common's requirements) is Linux with bionic: it takes the POSIX
-code, and `#if defined(__ANDROID__)` marks what differs (the texts of `explain.cpp`, the GUI's
-configuration directory, `test_support.cpp`). An app reaches Bluetooth only through Java, so the GUI's
-`Worker` gets a `LinkOpener` (`Controller::set_link_opener()`): for a device `bt:<address>`,
-`android_bridge` hands `MainActivity` one end of a socket pair, waits for its status byte (bounded by
-`Timeouts::link` and the cancel descriptor), and gives the other end to `Adapter::open_stream()`,
-which reads and writes a connected stream socket like a serial device (POSIX only). Writes use
-`MSG_NOSIGNAL`, so a closed peer is `kDisconnected`, not SIGPIPE.
+code, and `#if defined(__ANDROID__)` marks what differs (the GUI's configuration directory,
+`test_support.cpp`). An app reaches Bluetooth only through Java, so the GUI's `Worker` gets a
+`LinkOpener` (`Controller::set_link_opener()`): for a device `bt:<address>`, `android_bridge` calls
+`open_bridged_link()`, which hands `MainActivity` one end of a socket pair, waits for its status byte
+(a `LinkAnswer`, bounded by `Timeouts::link` and the cancel descriptor), and returns the other end
+for `Adapter::open_stream()`, which reads and writes a connected stream socket like a serial device
+(POSIX only). Writes use `MSG_NOSIGNAL` (`SO_NOSIGPIPE` on Apple's systems), so a closed peer is
+`kDisconnected`, not SIGPIPE.
+
+macOS and iOS (`__APPLE__`; iOS by `TARGET_OS_IOS` from `<TargetConditionals.h>`) take the POSIX code
+too. Where Linux has calls of its own, `COMMON_LINUX_API` (Common's `config.hpp`) picks portable POSIX
+code in their place: `Event` and `StopSignals` use pipes (and a signal handler) instead of eventfd and
+signalfd, `poll_until()` uses `poll` instead of `ppoll`. The `portable` preset builds Linux with that
+code (`COMMON_PORTABLE_POSIX`) and must pass. iOS has no Bluetooth (classic) for apps:
+`ios_bridge.mm` links Bluetooth Low Energy adapters (`ble:<identifier>`) through `open_bridged_link()`
+as Android does. There is no Mac here: Apple-only code is reviewed, not compiled (see Build & test).
 
 ## Rules for the library, the CLI and the GUI's own code (`lib/`, `cli/`, `gui/`)
 The rules of Common's CLAUDE.md apply:
@@ -153,6 +169,12 @@ For Android, set `ANDROID_NDK_HOME` to the NDK r29 and build `android-arm64` and
 its executables are static, so the tests run on the Linux host with bionic. Then build the app:
 `cd android && ./gradlew assembleDebug lintDebug` with `JAVA_HOME` (JDK 17+) and `ANDROID_HOME` set.
 There is no emulator here (no KVM access): the app itself is untested on a device.
+
+For macOS and iOS, run the `portable` preset (warning-free, and passing). On a Mac, `macos-debug`,
+`macos-release` and `ios` (an Xcode project); `.github/workflows/apple.yml` runs them on a Mac runner
+when started by hand (it needs the secret `SUBMODULE_TOKEN`). The iOS app's Objective-C++
+(`gui/*.mm`) builds with `-Wno-error` until it has been made warning-free in Xcode: remove that from
+`gui/CMakeLists.txt` then.
 
 The GUI is built when GLFW 3.3+ is found (`ELM327_BUILD_GUI=AUTO`): `sudo apt install
 libglfw3-dev`. On this machine, without sudo, GLFW is that Ubuntu package extracted into `~/.local`,

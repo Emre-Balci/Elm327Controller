@@ -308,6 +308,59 @@ TEST_CASE(adapter_and_the_demo_simulator) {
     CHECK(next.execute("ATI", response) == common::Status::kDisconnected);
 }
 
+TEST_CASE(adapter_over_tcp) {
+    elm327::sim::FakeElm327 fake{elm327::sim::example_vehicle(), elm327::sim::Behaviour{},
+                                 elm327::sim::Transport::kTcp};
+    REQUIRE(fake.valid());
+    CHECK(fake.device_path().rfind("tcp:127.0.0.1:", 0U) == 0U);
+    elm327::Adapter adapter{};
+    REQUIRE(open(adapter, fake));
+    REQUIRE(common::is_ok(adapter.initialize('0')));
+    elm327::Response response{};
+    REQUIRE(common::is_ok(adapter.execute("ATRV", response, common::Deadline::after(5s))));
+    CHECK(test::string_of(response.line(0U)) == "12.6V");
+    CHECK(open(adapter, fake) == false);  // Open already.
+
+    // Closed and opened again, as a person reconnects; then the adapter goes away.
+    CHECK(common::is_ok(adapter.close()));
+    REQUIRE(open(adapter, fake));
+    REQUIRE(common::is_ok(adapter.execute("ATRV", response, common::Deadline::after(5s))));
+    const std::string device{fake.device_path()};
+    fake.hang_up();
+    CHECK(adapter.execute("ATI", response) == common::Status::kDisconnected);
+    CHECK(common::is_ok(adapter.close()));
+
+    // Nothing listens at the port any more.
+    CHECK(adapter.open(device.c_str(), elm327::AdapterOptions{}) == common::Status::kDisconnected);
+}
+
+TEST_CASE(adapter_tcp_addresses) {
+    elm327::Adapter adapter{};
+    for (const char* const device : {"tcp:", "tcp:192.168.0.10", "tcp:192.168.0.10:", "tcp::35000",
+                                     "tcp:192.168.0.10:0", "tcp:192.168.0.10:65536", "tcp:192.168.0.10:3x",
+                                     "tcp:obd.example:35000", "tcp:[::1:35000", "tcp:192.168.0.300:35000"}) {
+        CHECK(adapter.open(device, elm327::AdapterOptions{}) == common::Status::kInvalidArgument);
+    }
+    CHECK(!adapter.is_open());
+
+    // An address that does not answer: the wait ends at the cancel descriptor, or the network says
+    // at once that it is unreachable.
+    test::Event event{};
+    REQUIRE(event.valid());
+    event.signal();
+    adapter.set_cancel_descriptor(event.descriptor());
+    const common::TimePoint start{common::MonotonicClock::now()};
+    const common::Status cancelled{adapter.open("tcp:192.0.2.1:35000", elm327::AdapterOptions{})};
+    CHECK((cancelled == common::Status::kInterrupted) || (cancelled == common::Status::kDisconnected));
+    adapter.set_cancel_descriptor(common::kInvalidNativeHandle);
+    elm327::AdapterOptions quick{};
+    quick.timeouts.link = 50ms;
+    const common::Status timed_out{adapter.open("tcp:[2001:db8::1]:35000", quick)};
+    CHECK((timed_out == common::Status::kTimeout) || (timed_out == common::Status::kDisconnected));
+    CHECK((common::MonotonicClock::now() - start) < 2s);
+    CHECK(!adapter.is_open());
+}
+
 TEST_CASE(adapter_cancel_over_a_stream) {
     elm327::sim::Behaviour behaviour{};
     behaviour.silent = true;

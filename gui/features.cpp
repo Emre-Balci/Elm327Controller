@@ -93,9 +93,6 @@ constexpr std::string_view kDirectoryName{"\\elm327controller"};
 constexpr std::string_view kBackupFile{"\\backups.txt"};
 #elif defined(__ANDROID__)
 constexpr std::string_view kBackupFile{"/backups.txt"};
-
-/// The directory that set_config_directory() gave; empty until then.
-Path g_config_directory{};
 #else
 constexpr std::string_view kDirectoryName{"/.config/elm327controller"};
 constexpr std::string_view kBackupFile{"/backups.txt"};
@@ -106,6 +103,12 @@ constexpr std::size_t kPasswordBuffer{4096U};
 
 /// The largest definitions file of the Features tab.
 constexpr std::size_t kMaxDefinitions{64U * 1024U};
+
+/// The directory that set_config_directory() gave; empty for the system's.
+Path g_config_directory{};
+
+/// The system's configuration directory; see config_directory().
+common::Status system_config_directory(Path& directory) noexcept;
 
 /// Permissions: the user's own (octal 0700 for a directory, 0600 for the backups). Windows has no
 /// permission bits: there the files inherit the security of the user's profile.
@@ -147,8 +150,24 @@ std::string_view simulator_features() noexcept {
     return kSimulatorFeatures;
 }
 
-#if defined(_WIN32)
 common::Status config_directory(Path& directory) noexcept {
+    directory = g_config_directory;
+    return directory.empty() ? system_config_directory(directory) : common::Status::kOk;
+}
+
+common::Status set_config_directory(const std::string_view directory) noexcept {
+    g_config_directory.clear();
+    const bool fits{g_config_directory.append(directory)};
+    if (!fits) {
+        g_config_directory.clear();
+    }
+    return fits ? common::Status::kOk : common::Status::kOutOfRange;
+}
+
+namespace {
+
+#if defined(_WIN32)
+common::Status system_config_directory(Path& directory) noexcept {
     directory.clear();
     // The known folder, not the environment variable APPDATA. The shell allocates the path.
     PWSTR folder{nullptr};
@@ -170,21 +189,12 @@ common::Status config_directory(Path& directory) noexcept {
     return status;
 }
 #elif defined(__ANDROID__)
-common::Status config_directory(Path& directory) noexcept {
-    directory = g_config_directory;
-    return directory.empty() ? common::Status::kNotFound : common::Status::kOk;
-}
-
-common::Status set_config_directory(const std::string_view directory) noexcept {
-    g_config_directory.clear();
-    const bool fits{g_config_directory.append(directory)};
-    if (!fits) {
-        g_config_directory.clear();
-    }
-    return fits ? common::Status::kOk : common::Status::kOutOfRange;
+common::Status system_config_directory(Path& directory) noexcept {
+    directory.clear();
+    return common::Status::kNotFound;  // No home directory: the app gives its own.
 }
 #else
-common::Status config_directory(Path& directory) noexcept {
+common::Status system_config_directory(Path& directory) noexcept {
     directory.clear();
     passwd entry{};
     passwd* found{nullptr};
@@ -200,6 +210,8 @@ common::Status config_directory(Path& directory) noexcept {
     return status;
 }
 #endif
+
+}  // namespace
 
 void load_definitions(const char* const file, Definitions& definitions) noexcept {
     // Static: the text of the file is large, and loaded once.

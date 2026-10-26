@@ -4,7 +4,6 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
-#include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #if defined(__ANDROID__)
@@ -33,37 +32,6 @@ void close_native(common::NativeHandle& handle) {
 
 }  // namespace
 
-#if defined(_WIN32)
-Event::Event() : descriptor_{::CreateEventW(nullptr, TRUE, FALSE, nullptr)} {}
-#else
-Event::Event() : descriptor_{::eventfd(0U, EFD_CLOEXEC | EFD_NONBLOCK)} {}
-#endif
-
-Event::~Event() {
-    close_native(descriptor_);
-}
-
-void Event::signal() const {
-#if defined(_WIN32)
-    static_cast<void>(::SetEvent(descriptor_));
-#else
-    const std::uint64_t one{1U};
-    // A void cast does not silence warn_unused_result (glibc with _FORTIFY_SOURCE).
-    const ssize_t written{::write(descriptor_, &one, sizeof(one))};
-    static_cast<void>(written);
-#endif
-}
-
-void Event::clear() const {
-#if defined(_WIN32)
-    static_cast<void>(::ResetEvent(descriptor_));
-#else
-    std::uint64_t value{0U};
-    const ssize_t count{::read(descriptor_, &value, sizeof(value))};
-    static_cast<void>(count);
-#endif
-}
-
 Capture::Capture() {
 #if defined(_WIN32)
     std::array<wchar_t, MAX_PATH + 1U> directory{};
@@ -79,8 +47,15 @@ Capture::Capture() {
 #elif defined(__ANDROID__)
     // Bionic declares memfd_create() from API level 30 on; the system call is older.
     descriptor_ = static_cast<common::NativeHandle>(::syscall(__NR_memfd_create, "capture", MFD_CLOEXEC));
-#else
+#elif COMMON_LINUX_API
     descriptor_ = ::memfd_create("capture", MFD_CLOEXEC);
+#else
+    // No memfd_create() (macOS): a temporary file, removed at once, so that it goes with the descriptor.
+    std::string name{"/tmp/elm327-capture-XXXXXX"};
+    descriptor_ = ::mkstemp(name.data());
+    if (descriptor_ >= 0) {
+        static_cast<void>(::unlink(name.c_str()));
+    }
 #endif
 }
 
@@ -118,7 +93,13 @@ Pipe::Pipe() {
     }
 #else
     std::array<int, 2U> ends{{-1, -1}};
-    if (::pipe2(ends.data(), O_CLOEXEC) == 0) {
+#if COMMON_LINUX_API
+    const bool created{::pipe2(ends.data(), O_CLOEXEC) == 0};
+#else
+    const bool created{(::pipe(ends.data()) == 0) && (::fcntl(ends[0U], F_SETFD, FD_CLOEXEC) == 0) &&
+                       (::fcntl(ends[1U], F_SETFD, FD_CLOEXEC) == 0)};  // No pipe2() on macOS.
+#endif
+    if (created) {
         read_ = ends[0U];
         write_ = ends[1U];
     }

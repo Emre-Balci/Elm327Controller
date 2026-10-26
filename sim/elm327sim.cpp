@@ -3,15 +3,18 @@
 ///        connected to a car that keeps accelerating and braking, for trying elm327ctl without
 ///        hardware.
 ///
-/// Usage: elm327sim [--legacy] [--ignition-off] [--slow]
+/// Usage: elm327sim [--legacy] [--ignition-off] [--slow] [--tcp]
 ///   --legacy        the car speaks ISO 9141-2 instead of CAN
 ///   --ignition-off  the car does not answer ("UNABLE TO CONNECT")
 ///   --slow          resets and the protocol search take as long as on a real adapter
+///   --tcp           a TCP port on 127.0.0.1, like an adapter on Wi-Fi (not on Windows)
 ///
 /// It prints the device to use with elm327ctl -d or elm327gui -d and runs until Ctrl+C. Like the
 /// tests, this tool is outside the compliance scope of the library.
 
-#if defined(_WIN32)
+#include "common/core/config.hpp"
+
+#if defined(_WIN32) || !COMMON_LINUX_API
 #include <atomic>
 #include <csignal>
 #include <thread>
@@ -35,8 +38,9 @@ namespace {
 
 using namespace std::chrono_literals;
 
-#if defined(_WIN32)
-/// Set by Ctrl+C or Ctrl+Break; the handler runs on a thread of the console.
+#if defined(_WIN32) || !COMMON_LINUX_API
+/// Set by Ctrl+C or Ctrl+Break (on Windows, where the handler runs on a thread of the console) or
+/// SIGTERM (on macOS, which has no sigtimedwait()).
 std::atomic<bool> g_stop{false};
 
 void request_stop(const int /*signal*/) {
@@ -49,6 +53,7 @@ void request_stop(const int /*signal*/) {
 int main(const int argc, const char* const argv[]) {
     elm327::sim::Vehicle vehicle{elm327::sim::example_vehicle()};
     elm327::sim::Behaviour behaviour{};
+    elm327::sim::Transport transport{elm327::sim::Transport::kDevice};
     for (int index{1}; index < argc; ++index) {
         const std::string_view argument{argv[index]};
         if (argument == "--legacy") {
@@ -58,8 +63,12 @@ int main(const int argc, const char* const argv[]) {
         } else if (argument == "--slow") {
             behaviour.reset_delay = 800ms;
             behaviour.search_delay = 2s;
+#if !defined(_WIN32)
+        } else if (argument == "--tcp") {
+            transport = elm327::sim::Transport::kTcp;
+#endif
         } else {
-            std::fprintf(stderr, "usage: elm327sim [--legacy] [--ignition-off] [--slow]\n");
+            std::fprintf(stderr, "usage: elm327sim [--legacy] [--ignition-off] [--slow] [--tcp]\n");
             return EXIT_FAILURE;
         }
     }
@@ -67,6 +76,9 @@ int main(const int argc, const char* const argv[]) {
 #if defined(_WIN32)
     static_cast<void>(std::signal(SIGINT, &request_stop));
     static_cast<void>(std::signal(SIGBREAK, &request_stop));
+#elif !COMMON_LINUX_API
+    static_cast<void>(std::signal(SIGINT, &request_stop));
+    static_cast<void>(std::signal(SIGTERM, &request_stop));
 #else
     // Blocked before the simulation thread starts, so that only sigtimedwait() below takes them.
     sigset_t signals{};
@@ -76,12 +88,12 @@ int main(const int argc, const char* const argv[]) {
     static_cast<void>(pthread_sigmask(SIG_BLOCK, &signals, nullptr));
 #endif
 
-    elm327::sim::FakeElm327 adapter{vehicle, behaviour};
+    elm327::sim::FakeElm327 adapter{vehicle, behaviour, transport};
     if (!adapter.valid()) {
 #if defined(_WIN32)
         std::fprintf(stderr, "elm327sim: cannot create a named pipe\n");
 #else
-        std::fprintf(stderr, "elm327sim: cannot create a pseudo-terminal\n");
+        std::fprintf(stderr, "elm327sim: cannot create a pseudo-terminal or a TCP port\n");
 #endif
         return EXIT_FAILURE;
     }
@@ -94,7 +106,7 @@ int main(const int argc, const char* const argv[]) {
     static_cast<void>(std::fflush(stdout));
 
     const common::TimePoint start{common::MonotonicClock::now()};
-#if defined(_WIN32)
+#if defined(_WIN32) || !COMMON_LINUX_API
     while (!g_stop.load()) {
         std::this_thread::sleep_for(100ms);
         elm327::sim::drive(adapter, common::MonotonicClock::now() - start);

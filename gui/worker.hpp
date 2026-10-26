@@ -43,6 +43,7 @@
 #include "elm327/adapter/adapter.hpp"
 #include "elm327/adapter/response.hpp"
 #include "elm327/controller/controller.hpp"
+#include "elm327/controller/event.hpp"
 #include "elm327/expert/feature.hpp"
 #include "elm327/expert/uds.hpp"
 #include "elm327/obd/dtc.hpp"
@@ -356,10 +357,10 @@ private:
     common::SpscQueue<FeatureResult, kFeatureCapacity> feature_results_{};
     std::atomic<std::uint32_t> generation_{0U};
     std::atomic<std::uint64_t> dropped_{0U};
-    /// An eventfd (on Windows, a manual-reset event): a request was posted.
-    common::NativeHandle wake_descriptor_{common::kInvalidNativeHandle};
-    /// Another one: the Controller's cancel descriptor.
-    common::NativeHandle cancel_descriptor_{common::kInvalidNativeHandle};
+    /// Readable when a request was posted.
+    Event wake_{};
+    /// The Controller's cancel descriptor.
+    Event cancel_{};
     NotifyFunction notify_{nullptr};
     void* notify_context_{nullptr};
     common::RtThread thread_{};
