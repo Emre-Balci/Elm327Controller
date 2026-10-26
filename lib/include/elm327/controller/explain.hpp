@@ -34,7 +34,10 @@ struct Explanation final {
 [[nodiscard]] Explanation explain_failure(common::Status status, const Response& response) noexcept;
 
 /// Explains why opening the device failed with @p status (ConnectFailure::kOpen), e.g. "no such
-/// device", or "permission denied" with the advice to join the dialout group (Linux).
+/// device", or "permission denied" with the advice to join the dialout group (Linux). On Android,
+/// where the device is a Bluetooth link, the advice is about Bluetooth: pairing, the permission for
+/// nearby devices, Bluetooth being off (kNotRunning), or an adapter that does not accept the
+/// connection (kTimeout, kDisconnected).
 [[nodiscard]] Explanation explain_open_failure(common::Status status) noexcept;
 
 /// Explains why Controller::connect() failed with @p status at the step @p failure (see

@@ -1,9 +1,9 @@
 # Elm327Controller — notes for Claude
 
-C++17 tools for ELM327 OBD-II adapters on Linux and Windows (MSVC), built on the Common library, in
-two parts: the static library `libelm327`, and the front-ends on it, `elm327ctl` (command line and
-interactive shell) and `elm327gui` (Dear ImGui). See README.md for the commands, the layers and how
-Common is used.
+C++17 tools for ELM327 OBD-II adapters on Linux, Windows (MSVC) and Android, built on the Common
+library, in two parts: the static library `libelm327`, and the front-ends on it, `elm327ctl`
+(command line and interactive shell) and `elm327gui` (Dear ImGui; on Android, an app). See README.md
+for the commands, the layers and how Common is used.
 
 ## Layout
 - `lib/`: the static library. Headers in `lib/include/elm327/<group>/`, sources in
@@ -38,9 +38,12 @@ Common is used.
   `FeatureResult` each through another queue; `features` (in `elm327gui_core`) holds the built-in
   definitions, loads the user's file and appends every change to `backups.txt` in
   `~/.config/elm327controller` (found with `getpwuid_r`, as MISRA bans `getenv`; on Windows
-  `%APPDATA%\elm327controller`, the known folder from `SHGetKnownFolderPath`). Widget mode:
+  `%APPDATA%\elm327controller`, the known folder from `SHGetKnownFolderPath`; on Android the app's
+  directory on the shared storage, which `main_android` passes to `set_config_directory()`). Widget mode:
   `gauge` (also in `elm327gui_core`, no ImGui) holds the scale of every dial and plans the layout,
-  so a new dial is a row in its table plus a test; `dashboard` draws them.
+  so a new dial is a row in its table plus a test; `dashboard` draws them. On Android,
+  `main_android` (the native activity's `android_main()`, OpenGL ES 3) replaces `main`, and
+  `android_bridge` is the JNI side of what only Java reaches (see Platforms).
 - `sim/`: `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal (on Windows, a named
   pipe, which `Adapter` opens in place of a COM port), and the `elm327sim` tool. It answers OBD-II
   (service 01/03/04/07/09/0A) and a subset of UDS (sessions, read/write data by identifier, routine,
@@ -50,6 +53,14 @@ Common is used.
   `session_protected_dids` need the extended session, and `locked_dids` refuse them (security
   access). `did_value()` lets a test check what a write did, and that in read-only mode none
   arrived. Extend it whenever the library learns a new command, so the tests can cover it.
+  `Transport::kSocket` serves on a socket pair instead, whose other end goes to
+  `Adapter::open_stream()`. `demo` drives the car of `elm327sim` and runs it as the Android app's
+  demo device (`start_demo()`).
+- `android/`: the Android app, a Gradle project (Kotlin DSL, Java sources) whose native code is the
+  root `CMakeLists.txt` (target `elm327gui`, a shared library). `MainActivity` is the
+  `NativeActivity`; `BluetoothLink` connects a paired adapter and copies between its
+  `BluetoothSocket` and the native side's socket pair. The JNI method names and the status codes
+  are in step with `gui/android_bridge.cpp`: change both together.
 - `tests/<group>/`, `tests/cli/`, `tests/gui/`: tests with the same minimal framework as Common's.
   `test_support.hpp` has what they need from the OS (cancel events, captured output, pipes), with
   its OS code in `test_support.cpp`.
@@ -79,6 +90,15 @@ a manual-reset event on Windows, and `common::kInvalidNativeHandle` for none.
 - The shell's console runs in raw mode with VT input and output, so `LineEditor` gets the same
   escape sequences as on a terminal.
 - Keep the Linux behaviour unchanged when adding Windows code, and say in the header what differs.
+
+Android (API level 28+, 64-bit only, Common's requirements) is Linux with bionic: it takes the POSIX
+code, and `#if defined(__ANDROID__)` marks what differs (the texts of `explain.cpp`, the GUI's
+configuration directory, `test_support.cpp`). An app reaches Bluetooth only through Java, so the GUI's
+`Worker` gets a `LinkOpener` (`Controller::set_link_opener()`): for a device `bt:<address>`,
+`android_bridge` hands `MainActivity` one end of a socket pair, waits for its status byte (bounded by
+`Timeouts::link` and the cancel descriptor), and gives the other end to `Adapter::open_stream()`,
+which reads and writes a connected stream socket like a serial device (POSIX only). Writes use
+`MSG_NOSIGNAL`, so a closed peer is `kDisconnected`, not SIGPIPE.
 
 ## Rules for the library, the CLI and the GUI's own code (`lib/`, `cli/`, `gui/`)
 The rules of Common's CLAUDE.md apply:
@@ -127,6 +147,12 @@ from WSL. `msvc-release` matters: MSVC 19.40 has miscompiled code at `/O2` that 
 GUI needs a GLFW for MSVC: configure with `-DCMAKE_PREFIX_PATH=<its install directory>`. The
 `*_on_a_console` tests run elm327ctl in a pseudo console, and `elm327gui --screenshot` works there
 too. Never open a real COM port in a test.
+
+For Android, set `ANDROID_NDK_HOME` to the NDK r29 and build `android-arm64` and `android-x86_64`
+(also warning-free; both include the GUI's shared library), and run `ctest --preset android-x86_64`:
+its executables are static, so the tests run on the Linux host with bionic. Then build the app:
+`cd android && ./gradlew assembleDebug lintDebug` with `JAVA_HOME` (JDK 17+) and `ANDROID_HOME` set.
+There is no emulator here (no KVM access): the app itself is untested on a device.
 
 The GUI is built when GLFW 3.3+ is found (`ELM327_BUILD_GUI=AUTO`): `sudo apt install
 libglfw3-dev`. On this machine, without sudo, GLFW is that Ubuntu package extracted into `~/.local`,

@@ -1,6 +1,6 @@
 # Elm327Controller
 
-Tools and a library for ELM327 OBD-II adapters on Linux and Windows. They read live values, trouble
+Tools and a library for ELM327 OBD-II adapters on Linux, Windows and Android. They read live values, trouble
 codes and the VIN from a vehicle, monitor values over time, and pass raw commands to the adapter. A
 [read-only mode](#read-only-mode) makes the tools safe to leave connected to a car: it refuses, before
 sending, anything that could change the vehicle. An [expert mode](#expert-mode-uds-kwp-and-coding)
@@ -19,7 +19,8 @@ The project has two parts:
     command, it runs that command once, for scripts.
   - **`elm327gui`**, a graphical front-end drawn with [Dear ImGui](https://github.com/ocornut/imgui):
     live data with plots, or in widget mode as the gauges of a classic car dashboard; trouble
-    codes, the VIN, and a terminal for AT commands.
+    codes, the VIN, and a terminal for AT commands. On Android it is an app that connects to a
+    paired Bluetooth adapter (see [Android](#android)).
 
 `elm327sim` simulates an adapter and a vehicle on a pseudo-terminal (on Windows, a named pipe), to
 try everything without hardware.
@@ -48,6 +49,12 @@ needs GLFW, see [Building on Windows](#building-on-windows)):
 git clone --recurse-submodules https://github.com/Emre-Balci/Elm327Controller.git
 cd Elm327Controller
 cmake --preset msvc-release && cmake --build --preset msvc-release
+```
+
+For the Android app, with the Android SDK and NDK (see [Building for Android](#building-for-android)):
+
+```bash
+cd android && ./gradlew assembleDebug   # app/build/outputs/apk/debug/app-debug.apk
 ```
 
 If the repository was cloned without `--recurse-submodules`, run `git submodule update --init`.
@@ -466,6 +473,24 @@ risks, and *Send* stays disabled until you tick that you have backed up what it 
 read-only mode those controls are disabled, and the requests would be refused anyway: the guard is
 in the library, below the window.
 
+## Android
+
+The app is `elm327gui` with the same window and tabs, for phones and tablets with Android 9 or
+later (64-bit). It runs in landscape, keeps clear of the status bar, the navigation bar and a
+camera cutout, and keeps the screen on while it is connected. Text fields bring up the on-screen
+keyboard.
+
+- **Bluetooth adapters**: pair the adapter in Android's Bluetooth settings first (the PIN of most
+  is 1234 or 0000). The list next to the device field shows the paired devices; the app starts
+  with the first whose name contains OBD or ELM. On Android 12 and later it asks for the
+  permission to connect to nearby devices. It does not scan, so it needs no location.
+- **Simulator**: the same list offers the simulator, the car of `elm327sim` inside the app, so the
+  app can be tried without a car. It calls itself "ELM327 v1.5 (simulator)" in the connection bar.
+- **Your feature definitions** go into `features.ini` in `Android/data/io.github.emrebalci.elm327controller/files`
+  on the phone's shared storage, which a computer reaches over USB. `backups.txt` is written there.
+
+Bluetooth Low Energy, Wi-Fi and USB adapters are not supported yet (see [Next steps](#next-steps)).
+
 ## Connecting an adapter
 
 - USB adapters (FTDI, CH340, PL2303 chips) appear as `/dev/ttyUSB0`. Bluetooth adapters appear as
@@ -478,6 +503,8 @@ in the library, below the window.
   program has open is reported as in use.
 - Most adapters talk at 38400 bit/s, the default. If the adapter does not answer, try 9600 or
   115200 (`-b`, `set baud`, or the Baud list of the GUI).
+- On Android, pair a Bluetooth adapter in the settings and choose it in the app; see
+  [Android](#android).
 - WSL does not see USB devices by default. Attach the adapter with
   [usbipd-win](https://github.com/dorssel/usbipd-win): in an administrator PowerShell, `usbipd list`,
   then `usbipd bind --busid <id>` once and `usbipd attach --wsl --busid <id>`.
@@ -491,10 +518,10 @@ in the library, below the window.
 
 | Layer | Where | What it does |
 |---|---|---|
-| Adapter | `elm327/adapter/` | `Adapter` sends a command over the serial port and collects the reply lines up to the `>` prompt, within a deadline and cancellable through a descriptor. After a command was interrupted, the next one waits for its late reply or stops the adapter, so a program can go on after Ctrl+C. `Response` classifies the lines (`OK`, `NO DATA`, `UNABLE TO CONNECT`, `CAN ERROR`, ...). |
+| Adapter | `elm327/adapter/` | `Adapter` sends a command over the serial port (or a connected stream socket, `open_stream()`) and collects the reply lines up to the `>` prompt, within a deadline and cancellable through a descriptor. After a command was interrupted, the next one waits for its late reply or stops the adapter, so a program can go on after Ctrl+C. `Response` classifies the lines (`OK`, `NO DATA`, `UNABLE TO CONNECT`, `CAN ERROR`, ...). |
 | OBD-II | `elm327/obd/` | `parse_messages()` turns reply lines into vehicle messages, including CAN multi-frame replies. `pid.hpp` names and decodes the service 01 PIDs exactly, `dtc.hpp` and `vin.hpp` decode trouble codes and the VIN in the CAN and the older formats. `ObdClient` runs the requests (and `clear_dtcs()`, service 04). `service.hpp` classifies a request as read or write for the read-only gate. |
 | Expert | `elm327/expert/` | `uds.hpp` builds and decodes UDS (ISO 14229) and KWP2000 requests -- session control, read/write data by identifier, routine control, security access, ECU reset, tester present -- and names the negative response codes. `decode_uds_response()` turns the adapter's reply, multi-frame included, into a `UdsExchange` that owns its bytes; both front-ends use it. `feature.hpp` reads [feature definitions](#adding-features-for-your-car) and `FeatureCoder` turns a feature on and off safely: identification and length checks, backup, session, write, verification, restore. `coding.hpp` is a reference map of common owner codings for VAG, Renault and BMW (no car-specific values). |
-| Controller | `elm327/controller/` | `Controller` keeps a connection: it opens and initializes the adapter in one step and tells which step failed, reads the supported PIDs once, notices an unplugged device, and returns PID values that own their bytes. Its access policy enforces [read-only mode](#read-only-mode) on every write. `explain.hpp` puts failures into words, `signals.hpp` stops a program cleanly on Ctrl+C, and `timing.hpp` schedules periodic reads without drift. |
+| Controller | `elm327/controller/` | `Controller` keeps a connection: it opens and initializes the adapter in one step and tells which step failed (a front-end's `LinkOpener` opens devices that are not serial devices, e.g. the Android app's Bluetooth links), reads the supported PIDs once, notices an unplugged device, and returns PID values that own their bytes. Its access policy enforces [read-only mode](#read-only-mode) on every write. `explain.hpp` puts failures into words, `signals.hpp` stops a program cleanly on Ctrl+C, and `timing.hpp` schedules periodic reads without drift. |
 
 A program uses it like this:
 
@@ -546,8 +573,9 @@ the result once, half to even, to the resolution of the PID, so `(256 * A + B) /
 | Shell | `cli/shell.hpp`, `cli/terminal.hpp`, `cli/line_editor.hpp` | The shell reads lines through `LineInput`: in raw mode on a terminal, where `LineEditor` turns the keys into a line, or as plain lines from a pipe. While a command runs the terminal is back in its normal mode, so Ctrl+C reaches the command as SIGINT (through `StopSignals`; on Windows as a console control event), and the shell takes the request and goes on. |
 | GUI worker | `gui/worker.hpp` | `Worker` owns the `Controller` on its own thread. The window posts requests through an `SpscQueue`; the worker publishes a `State` snapshot through a `TripleBuffer`, and PID samples, the traffic, the results of expert mode (`UdsResult`) and of the Features tab (`FeatureResult`) through four more queues. Nobody waits for anybody; `cancel()` interrupts the operation in progress. |
 | GUI window | `gui/app.hpp`, `gui/main.cpp` | `App` draws the State with ImGui each frame and turns clicks into requests. `main.cpp` sets up GLFW and the OpenGL 3 backend, and redraws on input, on a result of the worker, or 30 times per second while it works. |
+| Android app | `android/`, `gui/main_android.cpp`, `gui/android_bridge.hpp` | `MainActivity` (Java) is a `NativeActivity`, and `main_android.cpp` draws the same `App` on OpenGL ES 3 in its window. `android_bridge.hpp` reaches what only Java can: the paired Bluetooth devices, the links to them, the on-screen keyboard and the insets of the window. A link is a socket pair: `MainActivity` connects a `BluetoothSocket` and copies the bytes between it and one end, and the `Adapter` reads and writes the other end. |
 | Widget mode | `gui/gauge.hpp`, `gui/dashboard.hpp` | `gauge.hpp` knows which PIDs suit a dial and the scale of each (range, ticks, zones, words such as E and F), the geometry of needle and ticks, and plans the layout of a dashboard; it does not draw, so the tests cover it. `Dashboard` draws the dials and the digital displays with ImGui's draw lists, and moves each needle smoothly toward its value. |
-| Simulator | `sim/` | `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal (on Windows, a named pipe): the fixture of the tests and the core of `elm327sim`. |
+| Simulator | `sim/` | `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal (on Windows, a named pipe; or a socket pair): the fixture of the tests and the core of `elm327sim`. `demo.hpp` drives its car, for `elm327sim` and as the demo device of the Android app. |
 
 ## Building and testing
 
@@ -618,6 +646,45 @@ The programs take UTF-8 arguments, e.g. file paths, through a manifest that make
 page. The serial port is Common's `SerialPort`, with overlapped I/O that ends at the deadline; the
 adapter's reads end at the cancel event too.
 
+### Building for Android
+
+Requires the Android SDK with the NDK r29 (Android Studio installs both), and JDK 17 or later. The
+app is a Gradle project in `android/`, whose native code is this CMake project: open `android/` in
+Android Studio, or build it on the command line with `ANDROID_HOME` set to the SDK:
+
+```bash
+cd android
+./gradlew assembleDebug     # app/build/outputs/apk/debug/app-debug.apk, for arm64-v8a and x86_64
+./gradlew installDebug      # onto the phone connected with adb
+```
+
+A release build (`assembleRelease`) needs a signing key of your own (see Android's documentation).
+
+The library, the command-line tool and the tests also build with the NDK alone. With
+`ANDROID_NDK_HOME` set to it:
+
+```bash
+cmake --preset android-arm64 && cmake --build --preset android-arm64
+cmake --preset android-x86_64 && cmake --build --preset android-x86_64
+ctest --preset android-x86_64
+```
+
+`android-x86_64` links the executables statically, so the tests run on the Linux host itself with
+Android's C library (bionic), without an emulator. `adb push` them to run them on a device.
+
+### What differs on Android
+
+What differs from Linux:
+
+| | Linux | Android |
+|---|---|---|
+| Platforms | | Android 9 (API level 28) or later, 64-bit: arm64-v8a and x86_64 (Common's requirements) |
+| GUI | GLFW and OpenGL 3, a window | a `NativeActivity` with OpenGL ES 3, landscape, in a Gradle project (`android/`) |
+| Adapter | a serial device | a paired Bluetooth adapter (`bt:<address>`), linked through `MainActivity` and opened with `Adapter::open_stream()`; or the simulator in the app (`sim`) |
+| Failures | advice about devices and the `dialout` group | advice about pairing, the permission for nearby devices, and Bluetooth being off |
+| GUI's configuration | `~/.config/elm327controller` | the app's directory on the shared storage, `Android/data/<app>/files` |
+| `elm327ctl` | | builds and runs, e.g. under `adb shell`; a USB adapter's `/dev/ttyUSB0` needs a rooted phone |
+
 ## Rules
 
 The library (`lib/`) and the command-line tool (`cli/`) follow the rules of Common's README: no
@@ -630,7 +697,9 @@ through a descriptor.
 
 The GUI's own code (`gui/`) follows the same rules, and its worker is part of the tests, but Dear
 ImGui and GLFW allocate on the heap and are compiled without this project's checks; the plots
-convert the exact values to `float` for drawing only. The simulator and the tests use
+convert the exact values to `float` for drawing only. On Android it reaches Java through JNI, and
+the app's Java code (`android/`) and its demo device, the simulator, are outside the compliance
+scope. The simulator and the tests use
 `std::string`, `std::thread` and `<cstdio>` and are outside the compliance scope, like Common's
 tests and examples.
 
@@ -664,5 +733,9 @@ git commit -m "Update Dear ImGui to 1.93.0"
 - Baud-rate detection, and adapters over TCP (Wi-Fi).
 - Trying the Windows build with real USB and Bluetooth adapters: the tests reach its I/O through
   the simulator's named pipe, not through a COM port.
+- Trying the Android app with real Bluetooth adapters: the tests reach the stream I/O through the
+  simulator's socket pair, and the Java side was built and linted but not run on a phone here.
+- Adapters with Bluetooth Low Energy, Wi-Fi or USB (OTG) in the Android app, and remembering the
+  last adapter.
 - CSV output for `monitor`, and recording from the GUI.
 - A persistent history for the shell.

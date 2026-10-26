@@ -7,6 +7,9 @@
 #include <sys/eventfd.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined(__ANDROID__)
+#include <sys/syscall.h>
+#endif
 #endif
 
 #include <array>
@@ -73,6 +76,9 @@ Capture::Capture() {
                                         FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, nullptr)};
         descriptor_ = (file != INVALID_HANDLE_VALUE) ? file : common::kInvalidNativeHandle;
     }
+#elif defined(__ANDROID__)
+    // Bionic declares memfd_create() from API level 30 on; the system call is older.
+    descriptor_ = static_cast<common::NativeHandle>(::syscall(__NR_memfd_create, "capture", MFD_CLOEXEC));
 #else
     descriptor_ = ::memfd_create("capture", MFD_CLOEXEC);
 #endif

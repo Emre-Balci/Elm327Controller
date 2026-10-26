@@ -243,8 +243,13 @@ TEST_CASE(worker_reports_failures) {
     REQUIRE(worker->post(connect_request(test::kMissingDevice)));
     REQUIRE(wait_for(*worker, [](const State& state) { return state.message_count == 2U && idle(state); }));
     CHECK(!worker->state().connected);
-    CHECK(worker->state().message.view() == "Cannot connect to " + std::string{test::kMissingDevice} +
-                                                ": no such device (choose the adapter's serial device)");
+#if defined(__ANDROID__)
+    const std::string advice{"pair the adapter in the Bluetooth settings first"};
+#else
+    const std::string advice{"choose the adapter's serial device"};
+#endif
+    CHECK(worker->state().message.view() ==
+          "Cannot connect to " + std::string{test::kMissingDevice} + ": no such device (" + advice + ")");
 
     // The device goes away while connected.
     elm327::sim::FakeElm327 fake{};

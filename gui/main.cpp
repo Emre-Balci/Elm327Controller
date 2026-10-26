@@ -32,6 +32,7 @@
 #include "elm327/obd/pid.hpp"
 #include "elm327/version.hpp"
 #include "gui/app.hpp"
+#include "gui/features.hpp"
 #include "gui/worker.hpp"
 
 // The GLFW header comes without the system OpenGL headers (GLFW_INCLUDE_NONE): the OpenGL functions
@@ -368,58 +369,20 @@ common::Status save_screenshot(const char* const path, const int width, const in
     return is_ok(status) ? closed : status;
 }
 
-/// The largest definitions file of the Features tab.
-constexpr std::size_t kMaxDefinitions{64U * 1024U};
-
 /// Gives the Features tab its definitions: the simulator's, built in, then the user's file, from
 /// --features or features.ini in the configuration directory. A problem with the user's file is
 /// shown in the tab, and told on stderr.
 void load_definitions(const Arguments& arguments, elm327::gui::App& app) noexcept {
-    // Static: the list and the text of the file are large, and loaded once.
-    static elm327::expert::FeatureList features{};
-    static std::array<std::uint8_t, kMaxDefinitions> buffer{};
-    features.clear();
-    elm327::expert::FeatureParseError error{};
-    // Cannot fail: the tests parse the built-in definitions.
-    static_cast<void>(elm327::expert::parse_features(span_of(elm327::gui::simulator_features()), features, error));
-    const std::size_t built_in{features.size()};
-    elm327::gui::Path directory{};
-    const bool have_directory{is_ok(elm327::gui::config_directory(directory))};
-    elm327::gui::Path path{};
-    if (arguments.features != nullptr) {
-        static_cast<void>(path.append(std::string_view{arguments.features}));
-    } else if (have_directory) {
-        static_cast<void>(path.append(directory.text()) && path.append(elm327::gui::kPathSeparator) &&
-                          path.append("features.ini"));
-    } else {
-        // Without a home directory there is no file to look for.
+    // Static: the list of definitions is large.
+    static elm327::gui::Definitions definitions{};
+    elm327::gui::load_definitions(arguments.features, definitions);
+    if (!definitions.problem.empty()) {
+        write_text(standard_error(), "elm327gui: ");
+        write_text(standard_error(), definitions.problem.view());
+        write_text(standard_error(), "\n");
     }
-    common::StaticString<256U> source{};
-    common::StaticString<256U> problem{};
-    static_cast<void>(common::append_unsigned(source, built_in) && source.append(" built in for elm327sim"));
-    if (!path.empty()) {
-        const common::Status status{elm327::gui::load_features(path.c_str(), buffer, features, error)};
-        if (is_ok(status)) {
-            static_cast<void>(source.append(", ") && common::append_unsigned(source, features.size() - built_in) &&
-                              source.append(" from ") && source.append(path.text()));
-        } else if ((status == common::Status::kNotFound) && (arguments.features == nullptr)) {
-            // The default file does not exist yet: say where it goes.
-            static_cast<void>(source.append("; yours go in ") && source.append(path.text()));
-        } else {
-            static_cast<void>(problem.append(path.text()) && problem.append(": "));
-            if (error.line > 0U) {
-                static_cast<void>(problem.append("line ") && common::append_unsigned(problem, error.line) &&
-                                  problem.append(": ") && problem.append(error.message.text()));
-            } else {
-                static_cast<void>(problem.append(std::string_view{common::to_string(status)}));
-            }
-            write_text(standard_error(), "elm327gui: ");
-            write_text(standard_error(), problem.view());
-            write_text(standard_error(), "\n");
-        }
-    }
-    app.set_features(features, source.view(), problem.view(),
-                     have_directory ? directory.view() : std::string_view{});
+    app.set_features(definitions.features, definitions.source.view(), definitions.problem.view(),
+                     definitions.directory.view());
 }
 
 /// Runs the window until it is closed. @return the exit code.

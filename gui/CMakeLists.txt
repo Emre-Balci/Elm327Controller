@@ -1,7 +1,8 @@
 # elm327gui, the graphical front-end. The worker thread that talks to the adapter, the scales of the
 # gauges of widget mode, and the files of the Features tab are the library elm327gui_core, which does
 # not depend on ImGui, so the tests run them without a display. The window itself uses Dear ImGui
-# (the git submodule third_party/imgui) on GLFW and OpenGL 3.
+# (the git submodule third_party/imgui) on GLFW and OpenGL 3; on Android it is the shared library of
+# the app's native activity (android/), on the NDK's glue and OpenGL ES 3.
 if(ELM327_BUILD_TESTS OR NOT ELM327_BUILD_GUI STREQUAL "OFF")
     add_library(elm327gui_core STATIC features.cpp gauge.cpp worker.cpp)
     # The sources include each other as "gui/<file>.hpp".
@@ -22,11 +23,15 @@ endif()
 
 set(ELM327_IMGUI_DIR "${PROJECT_SOURCE_DIR}/third_party/imgui")
 set(ELM327_GUI_MISSING "")
+if(NOT ANDROID)
+    find_package(glfw3 3.3 QUIET)
+endif()
 if(NOT EXISTS "${ELM327_IMGUI_DIR}/imgui.cpp")
     list(APPEND ELM327_GUI_MISSING "the imgui submodule (run 'git submodule update --init')")
 endif()
-find_package(glfw3 3.3 QUIET)
-if(NOT glfw3_FOUND)
+if(ANDROID)
+    # The NDK brings everything the app needs.
+elseif(NOT glfw3_FOUND)
     if(WIN32)
         list(APPEND ELM327_GUI_MISSING
             "GLFW 3.3 or later (vcpkg install glfw3, or CMAKE_PREFIX_PATH set to an installed GLFW)")
@@ -45,26 +50,49 @@ endif()
 
 # Dear ImGui has no build of its own. It is compiled as it comes, without this project's warnings
 # and checks, and its headers are system headers for the code that includes them. The OpenGL 3
-# backend loads OpenGL at run time, so no OpenGL development files are needed.
+# backend loads OpenGL at run time, so no OpenGL development files are needed. On Android the
+# backends are those of the native activity and of OpenGL ES 3, and the NDK's glue, which is C,
+# comes along.
 add_library(imgui STATIC
     ${ELM327_IMGUI_DIR}/imgui.cpp
     ${ELM327_IMGUI_DIR}/imgui_draw.cpp
     ${ELM327_IMGUI_DIR}/imgui_tables.cpp
     ${ELM327_IMGUI_DIR}/imgui_widgets.cpp
-    ${ELM327_IMGUI_DIR}/backends/imgui_impl_glfw.cpp
     ${ELM327_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
 target_include_directories(imgui SYSTEM PUBLIC "${ELM327_IMGUI_DIR}" "${ELM327_IMGUI_DIR}/backends")
-target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS GLFW_INCLUDE_NONE)
+target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS)
+if(ANDROID)
+    set(ELM327_ANDROID_GLUE_DIR "${ANDROID_NDK}/sources/android/native_app_glue")
+    target_sources(imgui PRIVATE
+        ${ELM327_IMGUI_DIR}/backends/imgui_impl_android.cpp
+        ${ELM327_ANDROID_GLUE_DIR}/android_native_app_glue.c)
+    target_include_directories(imgui SYSTEM PUBLIC "${ELM327_ANDROID_GLUE_DIR}")
+    target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_ES3)
+    target_link_libraries(imgui PUBLIC android EGL GLESv3 log)
+else()
+    target_sources(imgui PRIVATE ${ELM327_IMGUI_DIR}/backends/imgui_impl_glfw.cpp)
+    target_compile_definitions(imgui PUBLIC GLFW_INCLUDE_NONE)
+    target_link_libraries(imgui PUBLIC glfw ${CMAKE_DL_LIBS})
+endif()
 # The code generation of the project: no exceptions, no RTTI (and with MSVC, a standard library
 # without exceptions, and the sources read as the UTF-8 they are).
 if(MSVC)
     target_compile_options(imgui PRIVATE /EHs-c- /GR- /utf-8)
     target_compile_definitions(imgui PRIVATE _HAS_EXCEPTIONS=0)
 else()
-    target_compile_options(imgui PRIVATE -fno-exceptions -fno-rtti)
+    target_compile_options(imgui PRIVATE "$<$<COMPILE_LANGUAGE:CXX>:-fno-exceptions;-fno-rtti>")
 endif()
-target_link_libraries(imgui PUBLIC glfw ${CMAKE_DL_LIBS})
 set_target_properties(imgui PROPERTIES CXX_CLANG_TIDY "")
+
+if(ANDROID)
+    # The library that MainActivity, a NativeActivity, loads: android_main() is its entry point,
+    # through ANativeActivity_onCreate() of the glue, which the linker must keep. The simulator is
+    # in it as the demo device.
+    add_library(elm327gui SHARED main_android.cpp android_bridge.cpp app.cpp dashboard.cpp)
+    target_link_libraries(elm327gui PRIVATE elm327gui_core elm327_sim imgui common::options)
+    target_link_options(elm327gui PRIVATE "-Wl,-u,ANativeActivity_onCreate")
+    return()
+endif()
 
 add_executable(elm327gui main.cpp app.cpp dashboard.cpp ${ELM327_WINDOWS_MANIFEST})
 target_link_libraries(elm327gui PRIVATE elm327gui_core imgui common::options)

@@ -75,7 +75,7 @@ common::Status Controller::connect(const ConnectionSettings& settings) noexcept 
     AdapterOptions options{};
     options.serial.baud_rate = settings.baud_rate;
     options.timeouts = settings.timeouts;
-    common::Status status{adapter_.open(settings.device.c_str(), options)};
+    common::Status status{open(settings, options)};
     if (!is_ok(status)) {
         failure_ = ConnectFailure::kOpen;
     } else {
@@ -89,6 +89,23 @@ common::Status Controller::connect(const ConnectionSettings& settings) noexcept 
         }
     }
     return status;
+}
+
+common::Status Controller::open(const ConnectionSettings& settings, const AdapterOptions& options) noexcept {
+#if defined(_WIN32)
+    return adapter_.open(settings.device.c_str(), options);
+#else
+    common::Status status{common::Status::kNotSupported};
+    if (link_opener_ != nullptr) {
+        const common::Result<common::NativeHandle> link{link_opener_(
+            settings.device.c_str(), common::Deadline::after(settings.timeouts.link), cancel_descriptor_, link_context_)};
+        status = link.has_value() ? adapter_.open_stream(link.value(), options) : link.status();
+    }
+    if (status == common::Status::kNotSupported) {
+        status = adapter_.open(settings.device.c_str(), options);  // Not a link: a serial device.
+    }
+    return status;
+#endif
 }
 
 void Controller::disconnect() noexcept {

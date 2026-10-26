@@ -5,7 +5,7 @@
 #include <windows.h>
 
 #include <shlobj.h>
-#else
+#elif !defined(__ANDROID__)
 #include <pwd.h>
 #include <unistd.h>
 #endif
@@ -91,6 +91,11 @@ off      = 03
 /// In the user's roaming application data, e.g. C:\Users\<name>\AppData\Roaming.
 constexpr std::string_view kDirectoryName{"\\elm327controller"};
 constexpr std::string_view kBackupFile{"\\backups.txt"};
+#elif defined(__ANDROID__)
+constexpr std::string_view kBackupFile{"/backups.txt"};
+
+/// The directory that set_config_directory() gave; empty until then.
+Path g_config_directory{};
 #else
 constexpr std::string_view kDirectoryName{"/.config/elm327controller"};
 constexpr std::string_view kBackupFile{"/backups.txt"};
@@ -98,6 +103,9 @@ constexpr std::string_view kBackupFile{"/backups.txt"};
 /// Room for the strings of a password database entry.
 constexpr std::size_t kPasswordBuffer{4096U};
 #endif
+
+/// The largest definitions file of the Features tab.
+constexpr std::size_t kMaxDefinitions{64U * 1024U};
 
 /// Permissions: the user's own (octal 0700 for a directory, 0600 for the backups). Windows has no
 /// permission bits: there the files inherit the security of the user's profile.
@@ -161,6 +169,20 @@ common::Status config_directory(Path& directory) noexcept {
     }
     return status;
 }
+#elif defined(__ANDROID__)
+common::Status config_directory(Path& directory) noexcept {
+    directory = g_config_directory;
+    return directory.empty() ? common::Status::kNotFound : common::Status::kOk;
+}
+
+common::Status set_config_directory(const std::string_view directory) noexcept {
+    g_config_directory.clear();
+    const bool fits{g_config_directory.append(directory)};
+    if (!fits) {
+        g_config_directory.clear();
+    }
+    return fits ? common::Status::kOk : common::Status::kOutOfRange;
+}
 #else
 common::Status config_directory(Path& directory) noexcept {
     directory.clear();
@@ -178,6 +200,53 @@ common::Status config_directory(Path& directory) noexcept {
     return status;
 }
 #endif
+
+void load_definitions(const char* const file, Definitions& definitions) noexcept {
+    // Static: the text of the file is large, and loaded once.
+    static std::array<std::uint8_t, kMaxDefinitions> buffer{};
+    definitions.features.clear();
+    definitions.source.clear();
+    definitions.problem.clear();
+    expert::FeatureParseError error{};
+    // Cannot fail: the tests parse the built-in definitions.
+    static_cast<void>(expert::parse_features(
+        common::Span<const char>{kSimulatorFeatures.data(), kSimulatorFeatures.size()}, definitions.features, error));
+    const std::size_t built_in{definitions.features.size()};
+    if (!is_ok(config_directory(definitions.directory))) {
+        definitions.directory.clear();
+    }
+    Path path{};
+    if (file != nullptr) {
+        static_cast<void>(path.append(std::string_view{file}));
+    } else if (!definitions.directory.empty()) {
+        static_cast<void>(path.append(definitions.directory.text()) && path.append(kPathSeparator) &&
+                          path.append("features.ini"));
+    } else {
+        // Without a home directory there is no file to look for.
+    }
+    common::StaticString<256U>& source{definitions.source};
+    common::StaticString<256U>& problem{definitions.problem};
+    static_cast<void>(common::append_unsigned(source, built_in) && source.append(" built in for elm327sim"));
+    if (!path.empty()) {
+        const common::Status status{load_features(path.c_str(), buffer, definitions.features, error)};
+        if (is_ok(status)) {
+            static_cast<void>(source.append(", ") &&
+                              common::append_unsigned(source, definitions.features.size() - built_in) &&
+                              source.append(" from ") && source.append(path.text()));
+        } else if ((status == common::Status::kNotFound) && (file == nullptr)) {
+            // The default file does not exist yet: say where it goes.
+            static_cast<void>(source.append("; yours go in ") && source.append(path.text()));
+        } else {
+            static_cast<void>(problem.append(path.text()) && problem.append(": "));
+            if (error.line > 0U) {
+                static_cast<void>(problem.append("line ") && common::append_unsigned(problem, error.line) &&
+                                  problem.append(": ") && problem.append(error.message.text()));
+            } else {
+                static_cast<void>(problem.append(std::string_view{common::to_string(status)}));
+            }
+        }
+    }
+}
 
 common::Status load_features(const char* const path, const common::Span<std::uint8_t> buffer,
                              expert::FeatureList& features, expert::FeatureParseError& error) noexcept {

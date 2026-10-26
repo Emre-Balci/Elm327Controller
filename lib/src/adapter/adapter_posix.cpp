@@ -1,7 +1,10 @@
 #include "elm327/adapter/adapter.hpp"
 
+#include <fcntl.h>
 #include <poll.h>
+#include <sys/socket.h>
 #include <time.h>
+#include <unistd.h>
 
 #include <array>
 #include <cerrno>
@@ -10,6 +13,14 @@
 
 namespace elm327 {
 namespace {
+
+/// Reads of discard_input() on a stream, and the bytes each takes.
+constexpr std::uint32_t kMaxDiscards{64U};
+constexpr std::size_t kDiscardSize{256U};
+
+/// System calls per write_all() on a stream: a partial write, an EINTR restart or a wait for room
+/// each take one. The bound only guards against a signal storm.
+constexpr std::uint32_t kMaxWriteCalls{1000U};
 
 timespec to_relative_timespec(const common::Duration duration) noexcept {
     const std::int64_t ns{duration.count()};
@@ -49,34 +60,160 @@ common::Status wait_for_input(const common::NativeHandle port, const common::Nat
     return status;
 }
 
+/// Waits until @p stream takes more output or @p deadline passes. @return kOk (also for a hang-up or
+/// an error, which the write then reports), kTimeout, or kSystemError.
+common::Status wait_for_room(const common::NativeHandle stream, const common::Deadline& deadline) noexcept {
+    pollfd entry{};
+    entry.fd = stream;
+    entry.events = POLLOUT;
+    timespec timeout{};
+    const timespec* timeout_pointer{nullptr};
+    if (!deadline.is_never()) {
+        timeout = to_relative_timespec(deadline.remaining());
+        timeout_pointer = &timeout;
+    }
+    const int ready{::ppoll(&entry, 1U, timeout_pointer, nullptr)};
+    common::Status status{common::Status::kOk};
+    if (ready < 0) {
+        status = (errno == EINTR) ? common::Status::kOk : common::Status::kSystemError;
+    } else if (ready == 0) {
+        status = common::Status::kTimeout;
+    } else {
+        status = common::Status::kOk;
+    }
+    return status;
+}
+
+/// The Status of a failed read or write on a stream, as common::SerialPort reports it for a device:
+/// a peer that went away is kDisconnected.
+common::Status stream_status(const int error) noexcept {
+    common::Status status{common::Status::kSystemError};
+    switch (error) {
+        case EPIPE:
+        case ECONNRESET:
+        case ECONNABORTED:
+        case ENOTCONN:
+        case ETIMEDOUT:  // The link timed out, e.g. a Bluetooth adapter out of reach.
+        case EHOSTUNREACH:
+        case ENETDOWN:
+        case EIO:
+            status = common::Status::kDisconnected;
+            break;
+        case ENOBUFS:
+        case ENOMEM:
+            status = common::Status::kResourceLimit;
+            break;
+        default:
+            break;
+    }
+    return status;
+}
+
 }  // namespace
 
 common::Status Adapter::open_device(const char* const path, const common::SerialOptions& options) noexcept {
-    return port_.open(path, options);
+    return is_open() ? common::Status::kInvalidArgument : port_.open(path, options);
+}
+
+common::Status Adapter::adopt_stream(const common::NativeHandle stream) noexcept {
+    common::Status status{((stream != common::kInvalidNativeHandle) && (!is_open()))
+                              ? common::Status::kOk
+                              : common::Status::kInvalidArgument};
+    if (is_ok(status)) {
+        // Non-blocking, like the serial port: a read without data fails with EAGAIN.
+        const int flags{::fcntl(stream, F_GETFL)};
+        status = ((flags >= 0) && (::fcntl(stream, F_SETFL, flags | O_NONBLOCK) == 0)) ? common::Status::kOk
+                                                                                       : common::Status::kSystemError;
+    }
+    if (is_ok(status)) {
+        stream_ = stream;
+    } else if (stream != common::kInvalidNativeHandle) {
+        static_cast<void>(::close(stream));
+    } else {
+        // Nothing to close.
+    }
+    return status;
 }
 
 common::Status Adapter::close_device() noexcept {
-    return port_.close();
+    common::Status status{common::Status::kOk};
+    if (stream_ != common::kInvalidNativeHandle) {
+        // The descriptor is released even when close() reports an error.
+        status = (::close(stream_) == 0) ? common::Status::kOk : common::Status::kSystemError;
+        stream_ = common::kInvalidNativeHandle;
+    } else {
+        status = port_.close();
+    }
+    return status;
 }
 
 common::Status Adapter::discard_input() noexcept {
-    return port_.discard_input();
+    common::Status status{common::Status::kOk};
+    if (stream_ == common::kInvalidNativeHandle) {
+        status = port_.discard_input();
+    } else {
+        // A socket has no input queue to flush: read what has arrived. A peer that went away shows in
+        // the next read.
+        std::array<std::uint8_t, kDiscardSize> scratch{};
+        bool more{true};
+        for (std::uint32_t round{0U}; more && (round < kMaxDiscards); ++round) {
+            const ssize_t count{::read(stream_, scratch.data(), scratch.size())};
+            more = (count > 0) || ((count < 0) && (errno == EINTR));
+        }
+    }
+    return status;
 }
 
 common::Status Adapter::write_all(const common::Span<const std::uint8_t> data,
                                   const common::Deadline& deadline) noexcept {
-    return port_.write_all(data, deadline);
+    common::Status status{common::Status::kOk};
+    if (stream_ == common::kInvalidNativeHandle) {
+        status = port_.write_all(data, deadline);
+    } else {
+        common::Span<const std::uint8_t> rest{data};
+        for (std::uint32_t call{0U}; is_ok(status) && (!rest.empty()) && (call < kMaxWriteCalls); ++call) {
+            // MSG_NOSIGNAL: a peer that went away is EPIPE rather than a SIGPIPE that ends the process.
+            const ssize_t count{::send(stream_, rest.data(), rest.size(), MSG_NOSIGNAL)};
+            if (count >= 0) {
+                rest = rest.subspan(static_cast<std::size_t>(count));
+            } else if (errno == EAGAIN) {  // EWOULDBLOCK is the same.
+                status = wait_for_room(stream_, deadline);
+            } else if (errno != EINTR) {
+                status = stream_status(errno);
+            } else {
+                // Interrupted by a signal handler before anything was written: try again.
+            }
+        }
+        if (is_ok(status) && (!rest.empty())) {
+            status = common::Status::kTimeout;
+        }
+    }
+    return status;
 }
 
 common::Result<std::size_t> Adapter::receive(const common::Span<std::uint8_t> buffer,
                                              const common::Deadline& deadline) noexcept {
-    const common::Status status{wait_for_input(port_.descriptor(), cancel_descriptor_, deadline)};
+    const common::NativeHandle device{(stream_ != common::kInvalidNativeHandle) ? stream_ : port_.descriptor()};
+    const common::Status status{wait_for_input(device, cancel_descriptor_, deadline)};
     common::Result<std::size_t> result{common::Result<std::size_t>::failure(status)};
-    if (is_ok(status)) {
+    if (is_ok(status) && (stream_ != common::kInvalidNativeHandle)) {
+        const ssize_t count{::read(stream_, buffer.data(), buffer.size())};
+        if (count > 0) {
+            result = common::Result<std::size_t>::success(static_cast<std::size_t>(count));
+        } else if (count == 0) {
+            result = common::Result<std::size_t>::failure(common::Status::kDisconnected);  // The peer closed its end.
+        } else if ((errno == EAGAIN) || (errno == EINTR)) {  // EWOULDBLOCK is EAGAIN.
+            result = common::Result<std::size_t>::success(0U);
+        } else {
+            result = common::Result<std::size_t>::failure(stream_status(errno));
+        }
+    } else if (is_ok(status)) {
         // The port is ready, so an expired deadline still takes what has arrived.
         const common::Result<std::size_t> received{port_.read(buffer, common::Deadline{})};
         const bool nothing{(!received.has_value()) && (received.status() == common::Status::kTimeout)};
         result = nothing ? common::Result<std::size_t>::success(0U) : received;
+    } else {
+        // Interrupted, timed out, or the wait failed.
     }
     return result;
 }

@@ -5,8 +5,13 @@ project(elm327controller
     DESCRIPTION "Library, interactive command-line tool and GUI for ELM327 OBD-II adapters"
     LANGUAGES CXX)
 
-if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows"))
-    message(FATAL_ERROR "Elm327Controller targets Linux and Windows only")
+if(NOT (CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Windows" OR
+        CMAKE_SYSTEM_NAME STREQUAL "Android"))
+    message(FATAL_ERROR "Elm327Controller targets Linux, Windows and Android only")
+endif()
+if(ANDROID)
+    # The glue of the GUI's native activity is C.
+    enable_language(C)
 endif()
 
 option(ELM327_BUILD_CLI "Build the elm327ctl command-line tool" ${PROJECT_IS_TOP_LEVEL})
@@ -72,9 +77,9 @@ endif()
 
 add_subdirectory(gui)
 
-# The simulated adapter: a fixture of the tests, and the elm327sim tool to try the front-ends
-# without hardware.
-if(ELM327_BUILD_TESTS OR ELM327_BUILD_SIMULATOR)
+# The simulated adapter: a fixture of the tests, the elm327sim tool to try the front-ends without
+# hardware, and the demo device of the Android app.
+if(ELM327_BUILD_TESTS OR ELM327_BUILD_SIMULATOR OR (ANDROID AND NOT ELM327_BUILD_GUI STREQUAL "OFF"))
     add_subdirectory(sim)
 endif()
 

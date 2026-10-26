@@ -21,48 +21,19 @@
 #include <time.h>
 #endif
 
-#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
-#include <vector>
 
 #include "common/time/clock.hpp"
+#include "sim/demo.hpp"
 #include "sim/fake_elm327.hpp"
 
 namespace {
 
 using namespace std::chrono_literals;
-
-std::vector<std::uint8_t> big_endian(const std::int64_t value, const std::size_t bytes) {
-    std::vector<std::uint8_t> data(bytes, std::uint8_t{0U});
-    for (std::size_t index{0U}; index < bytes; ++index) {
-        const std::uint64_t shift{8U * (bytes - 1U - index)};
-        data[index] = static_cast<std::uint8_t>((static_cast<std::uint64_t>(value) >> shift) & 0xFFU);
-    }
-    return data;
-}
-
-/// Updates the car for @p elapsed time since the start: a 30 s cycle of accelerating from 0 to
-/// 120 km/h and braking to a stop, while the engine warms up.
-void drive(elm327::sim::FakeElm327& adapter, const common::Duration elapsed) {
-    const std::int64_t ms{elapsed.count() / 1'000'000};
-    const std::int64_t phase{ms % 30'000};
-    const std::int64_t speed{(phase < 15'000) ? ((phase * 120) / 15'000) : (((30'000 - phase) * 120) / 15'000)};
-    const std::int64_t rpm{800 + (speed * 25)};
-    const std::int64_t coolant{std::min<std::int64_t>(20 + (ms / 2'000), 90)};
-    const std::int64_t throttle{(phase < 15'000) ? 35 : 8};
-    adapter.set_pid(0x04U, big_endian(((15 + (speed / 2)) * 255) / 100, 1U));  // Engine load.
-    adapter.set_pid(0x05U, big_endian(coolant + 40, 1U));
-    adapter.set_pid(0x0CU, big_endian(rpm * 4, 2U));
-    adapter.set_pid(0x0DU, big_endian(speed, 1U));
-    adapter.set_pid(0x10U, big_endian(rpm * 2, 2U));  // Mass air flow: rpm / 50 g/s.
-    adapter.set_pid(0x11U, big_endian((throttle * 255) / 100, 1U));
-    adapter.set_pid(0x1FU, big_endian(ms / 1'000, 2U));  // Run time.
-    adapter.set_pid(0x5CU, big_endian(std::max<std::int64_t>(coolant - 5, 20) + 40, 1U));
-}
 
 #if defined(_WIN32)
 /// Set by Ctrl+C or Ctrl+Break; the handler runs on a thread of the console.
@@ -126,14 +97,14 @@ int main(const int argc, const char* const argv[]) {
 #if defined(_WIN32)
     while (!g_stop.load()) {
         std::this_thread::sleep_for(100ms);
-        drive(adapter, common::MonotonicClock::now() - start);
+        elm327::sim::drive(adapter, common::MonotonicClock::now() - start);
     }
 #else
     bool running{true};
     while (running) {
         const timespec period{0, 100'000'000};
         running = sigtimedwait(&signals, nullptr, &period) < 0;  // A timeout (or EINTR) goes on.
-        drive(adapter, common::MonotonicClock::now() - start);
+        elm327::sim::drive(adapter, common::MonotonicClock::now() - start);
     }
 #endif
     std::printf("Stopped.\n");

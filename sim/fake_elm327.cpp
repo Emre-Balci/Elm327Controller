@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <poll.h>
 #include <stdlib.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -214,8 +215,11 @@ Vehicle example_vehicle() {
 }
 
 #if defined(_WIN32)
-FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour)
+FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour, const Transport transport)
     : vehicle_{std::move(vehicle)}, behaviour_{std::move(behaviour)}, linefeeds_{behaviour_.linefeeds} {
+    if (transport != Transport::kDevice) {
+        return;  // Windows has no socket pairs here: valid() is false.
+    }
     const std::string name{"\\\\.\\pipe\\elm327sim-" + std::to_string(::GetCurrentProcessId()) + "-" +
                            std::to_string(g_next_pipe.fetch_add(1U))};
     // One instance, so that one program at a time has the simulated adapter, as with a serial port.
@@ -233,10 +237,23 @@ FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour)
     }
 }
 #else
-FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour)
-    : vehicle_{std::move(vehicle)}, behaviour_{std::move(behaviour)}, linefeeds_{behaviour_.linefeeds} {
-    master_ = ::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
-    if ((master_ >= 0) && (::grantpt(master_) == 0) && (::unlockpt(master_) == 0)) {
+FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour, const Transport transport)
+    : vehicle_{std::move(vehicle)},
+      behaviour_{std::move(behaviour)},
+      linefeeds_{behaviour_.linefeeds},
+      socket_{transport == Transport::kSocket} {
+    if (socket_) {
+        std::array<int, 2U> ends{{-1, -1}};
+        if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, ends.data()) == 0) {
+            master_ = ends[0U];
+            stream_ = ends[1U];
+            static_cast<void>(::fcntl(master_, F_SETFL, ::fcntl(master_, F_GETFL) | O_NONBLOCK));
+            device_path_ = "socket";
+        }
+    } else {
+        master_ = ::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+    }
+    if ((!socket_) && (master_ >= 0) && (::grantpt(master_) == 0) && (::unlockpt(master_) == 0)) {
         // Non-blocking: output nobody reads (the program closed the device) must not hang the thread.
         static_cast<void>(::fcntl(master_, F_SETFL, ::fcntl(master_, F_GETFL) | O_NONBLOCK));
         std::array<char, 128U> name{};
@@ -261,6 +278,12 @@ bool FakeElm327::valid() const {
 #else
 bool FakeElm327::valid() const {
     return (master_ >= 0) && (!device_path_.empty());
+}
+
+int FakeElm327::take_stream() {
+    const int stream{stream_};
+    stream_ = -1;
+    return stream;
 }
 #endif
 
@@ -377,6 +400,10 @@ void FakeElm327::hang_up() {
         static_cast<void>(::close(master_));
         master_ = -1;
     }
+    if (stream_ >= 0) {
+        static_cast<void>(::close(stream_));  // Nobody took it.
+        stream_ = -1;
+    }
 }
 
 void FakeElm327::run() {
@@ -391,7 +418,8 @@ void FakeElm327::run() {
         if (count > 0) {
             receive(buffer.data(), static_cast<std::size_t>(count));
         } else if (ready > 0) {
-            // No program has the device open: the master reports a hang-up until one opens it.
+            // No program has the device open: the master reports a hang-up until one opens it. (The
+            // other end of a socket pair stays closed.)
             std::this_thread::sleep_for(10ms);
         } else {
             // Nothing arrived.
@@ -815,7 +843,9 @@ void FakeElm327::send(const std::string& text) const {
 void FakeElm327::send(const std::string& text) const {
     std::size_t written{0U};
     for (int attempt{0}; (written < text.size()) && (attempt < kSendAttempts); ++attempt) {
-        const ssize_t count{::write(master_, text.data() + written, text.size() - written)};
+        // On a socket, MSG_NOSIGNAL: a closed other end is EPIPE rather than a SIGPIPE.
+        const ssize_t count{socket_ ? ::send(master_, text.data() + written, text.size() - written, MSG_NOSIGNAL)
+                                    : ::write(master_, text.data() + written, text.size() - written)};
         if (count > 0) {
             written += static_cast<std::size_t>(count);
         } else if ((count < 0) && (errno == EAGAIN)) {

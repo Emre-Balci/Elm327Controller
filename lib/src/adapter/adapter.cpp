@@ -107,6 +107,18 @@ common::Status Adapter::open(const char* const path, const AdapterOptions& optio
     return status;
 }
 
+#if !defined(_WIN32)
+common::Status Adapter::open_stream(const common::NativeHandle stream, const AdapterOptions& options) noexcept {
+    const common::Status status{adopt_stream(stream)};
+    if (is_ok(status)) {
+        timeouts_ = options.timeouts;
+        identity_.clear();
+        unsettled_ = false;
+    }
+    return status;
+}
+#endif
+
 common::Status Adapter::close() noexcept {
     identity_.clear();
     unsettled_ = false;

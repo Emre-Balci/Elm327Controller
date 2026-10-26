@@ -189,8 +189,15 @@ private:
     bool read_only_{false};  ///< Connect in read-only mode; toggled by the connection bar.
     std::array<common::StaticString<64U>, 13U> protocol_labels_{};
     std::array<const char*, 13U> protocol_items_{};
-    std::array<common::StaticString<ConnectionSettings::kMaxDeviceLength>, 24U> detected_{};
+    /// A device the list next to the device field offers: what it shows, and what it fills in.
+    struct Detected final {
+        common::StaticString<96U> label{};
+        common::StaticString<ConnectionSettings::kMaxDeviceLength> device{};
+    };
+    std::array<Detected, 24U> detected_{};
     std::size_t detected_count_{0U};
+    /// Why the list is short, e.g. "Bluetooth is off."; empty when there is nothing to tell.
+    std::string_view detected_hint_{};
     common::Duration timeout_{std::chrono::seconds{5}};
 
     // Live data.

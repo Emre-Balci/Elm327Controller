@@ -8,6 +8,7 @@
 #include "common/time/deadline.hpp"
 #include "elm327/adapter/adapter.hpp"
 #include "elm327/adapter/response.hpp"
+#include "sim/demo.hpp"
 #include "sim/fake_elm327.hpp"
 #include "test_framework.hpp"
 #include "test_support.hpp"
@@ -251,3 +252,81 @@ TEST_CASE(adapter_disconnected) {
     elm327::Response response{};
     CHECK(adapter.execute("ATI", response) == common::Status::kDisconnected);
 }
+
+#if !defined(_WIN32)
+TEST_CASE(adapter_over_a_stream) {
+    elm327::sim::FakeElm327 fake{elm327::sim::example_vehicle(), elm327::sim::Behaviour{},
+                                 elm327::sim::Transport::kSocket};
+    REQUIRE(fake.valid());
+    elm327::Adapter adapter{};
+    CHECK(adapter.open_stream(common::kInvalidNativeHandle, elm327::AdapterOptions{}) ==
+          common::Status::kInvalidArgument);
+    REQUIRE(common::is_ok(adapter.open_stream(fake.take_stream(), elm327::AdapterOptions{})));
+    CHECK(adapter.is_open());
+    CHECK(fake.take_stream() == -1);
+    CHECK(common::is_ok(adapter.initialize('0')));
+    CHECK(test::string_of(adapter.identity()) == "ELM327 v1.5");
+    elm327::Response response{};
+    REQUIRE(common::is_ok(adapter.execute("010D", response, common::Deadline::after(5s))));
+    REQUIRE(response.size() == 2U);  // The first OBD request: "SEARCHING..." first.
+    CHECK(test::string_of(response.line(1U)) == "41 0D 2A");
+
+    // Only one device at a time: a second stream is refused (and closed), as is a serial device.
+    elm327::sim::FakeElm327 other{elm327::sim::example_vehicle(), elm327::sim::Behaviour{},
+                                  elm327::sim::Transport::kSocket};
+    REQUIRE(other.valid());
+    CHECK(adapter.open_stream(other.take_stream(), elm327::AdapterOptions{}) == common::Status::kInvalidArgument);
+    elm327::sim::FakeElm327 device{};
+    CHECK(!open(adapter, device));
+    REQUIRE(common::is_ok(adapter.execute("ATRV", response, common::Deadline::after(5s))));
+    CHECK(test::string_of(response.line(0U)) == "12.6V");
+
+    // The other end goes away, like an unplugged adapter: no SIGPIPE, but kDisconnected.
+    fake.hang_up();
+    CHECK(adapter.execute("ATI", response) == common::Status::kDisconnected);
+    CHECK(common::is_ok(adapter.close()));
+    CHECK(!adapter.is_open());
+}
+
+TEST_CASE(adapter_and_the_demo_simulator) {
+    elm327::Adapter adapter{};
+    REQUIRE(common::is_ok(adapter.open_stream(elm327::sim::start_demo(), elm327::AdapterOptions{})));
+    REQUIRE(common::is_ok(adapter.initialize('0')));
+    // Nobody takes its values for those of a car.
+    CHECK(test::string_of(adapter.identity()) == "ELM327 v1.5 (simulator)");
+    elm327::Response response{};
+    REQUIRE(common::is_ok(adapter.execute("010C", response, common::Deadline::after(5s))));
+    CHECK(test::string_of(response.line(response.size() - 1U)).rfind("41 0C ", 0U) == 0U);
+
+    // The next demo replaces it: the link to the old one ends.
+    elm327::Adapter next{};
+    REQUIRE(common::is_ok(next.open_stream(elm327::sim::start_demo(), elm327::AdapterOptions{})));
+    CHECK(adapter.execute("ATI", response) == common::Status::kDisconnected);
+    REQUIRE(common::is_ok(next.execute("ATI", response, common::Deadline::after(5s))));
+    CHECK(test::string_of(response.line(0U)) == "ELM327 v1.5 (simulator)");
+    elm327::sim::stop_demo();
+    CHECK(next.execute("ATI", response) == common::Status::kDisconnected);
+}
+
+TEST_CASE(adapter_cancel_over_a_stream) {
+    elm327::sim::Behaviour behaviour{};
+    behaviour.silent = true;
+    elm327::sim::FakeElm327 fake{elm327::sim::example_vehicle(), behaviour, elm327::sim::Transport::kSocket};
+    REQUIRE(fake.valid());
+    elm327::Adapter adapter{};
+    REQUIRE(common::is_ok(adapter.open_stream(fake.take_stream(), elm327::AdapterOptions{})));
+    elm327::Response response{};
+    CHECK(adapter.execute("ATI", response, common::Deadline::after(50ms)) == common::Status::kTimeout);
+    test::Event event{};
+    REQUIRE(event.valid());
+    adapter.set_cancel_descriptor(event.descriptor());
+    const common::TimePoint start{common::MonotonicClock::now()};
+    std::thread canceller{[&event]() {
+        std::this_thread::sleep_for(30ms);
+        event.signal();
+    }};
+    CHECK(adapter.execute("ATI", response, common::Deadline::after(5s)) == common::Status::kInterrupted);
+    canceller.join();
+    CHECK((common::MonotonicClock::now() - start) < 2s);
+}
+#endif

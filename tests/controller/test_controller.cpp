@@ -55,6 +55,37 @@ std::string reason_of(const elm327::Explanation& explanation) {
     return text;
 }
 
+#if !defined(_WIN32)
+/// The links of a LinkOpener for the tests: "sim" is the simulator's socket, "bt:..." fails with
+/// failure, and anything else is a serial device.
+struct Links final {
+    elm327::sim::FakeElm327* fake{nullptr};
+    common::Status failure{common::Status::kNotFound};
+    int calls{0};
+    common::NativeHandle cancel{common::kInvalidNativeHandle};
+    common::Duration remaining{};
+};
+
+common::Result<common::NativeHandle> open_link(const char* const device, const common::Deadline& deadline,
+                                               const common::NativeHandle cancel, void* const context) noexcept {
+    Links* const links{static_cast<Links*>(context)};
+    ++links->calls;
+    links->cancel = cancel;
+    links->remaining = deadline.remaining();
+    const std::string name{device};
+    common::Result<common::NativeHandle> result{common::Result<common::NativeHandle>::failure(
+        common::Status::kNotSupported)};
+    if (name == "sim") {
+        result = common::Result<common::NativeHandle>::success(links->fake->take_stream());
+    } else if (name.rfind("bt:", 0U) == 0U) {
+        result = common::Result<common::NativeHandle>::failure(links->failure);
+    } else {
+        // A serial device.
+    }
+    return result;
+}
+#endif
+
 }  // namespace
 
 TEST_CASE(controller_settings_and_protocols) {
@@ -180,8 +211,13 @@ TEST_CASE(controller_connect_failures) {
     CHECK(controller.connect(settings) == common::Status::kNotFound);
     CHECK(controller.connect_failure() == elm327::ConnectFailure::kOpen);
     CHECK(!controller.connected());
+#if defined(__ANDROID__)
+    CHECK(reason_of(elm327::explain_connect_failure(controller.connect_failure(), common::Status::kNotFound)) ==
+          "no such device (pair the adapter in the Bluetooth settings first)");
+#else
     CHECK(reason_of(elm327::explain_connect_failure(controller.connect_failure(), common::Status::kNotFound)) ==
           "no such device (choose the adapter's serial device)");
+#endif
 
     REQUIRE(settings.device.assign(test::kNotSerialDevice));
     CHECK(controller.connect(settings) == common::Status::kInvalidArgument);
@@ -225,6 +261,51 @@ TEST_CASE(controller_notices_a_lost_device) {
     CHECK(reason_of(elm327::explain_failure(reading.status, controller.last_response())) == "disconnected");
 }
 
+#if !defined(_WIN32)
+TEST_CASE(controller_opens_links) {
+    elm327::sim::FakeElm327 link{elm327::sim::example_vehicle(), elm327::sim::Behaviour{},
+                                 elm327::sim::Transport::kSocket};
+    elm327::sim::FakeElm327 device{};
+    REQUIRE(link.valid() && device.valid());
+    Links links{};
+    links.fake = &link;
+    test::Event event{};
+    REQUIRE(event.valid());
+    elm327::Controller controller{};
+    controller.set_cancel_descriptor(event.descriptor());
+    controller.set_link_opener(&open_link, &links);
+
+    elm327::ConnectionSettings settings{};
+    REQUIRE(settings.device.assign("sim"));
+    settings.timeouts.link = 2s;
+    REQUIRE(common::is_ok(controller.connect(settings)));
+    CHECK(controller.connected());
+    CHECK(test::string_of(controller.identity()) == "ELM327 v1.5");
+    CHECK(links.calls == 1);
+    CHECK(links.cancel == event.descriptor());
+    CHECK((links.remaining > 1s) && (links.remaining <= 2s));
+    CHECK(common::is_ok(controller.connect_vehicle()));
+    CHECK(text_of(controller.read_pid(0x0DU)) == "42 km/h");
+
+    // The device that is not a link is a serial device.
+    REQUIRE(common::is_ok(controller.connect(settings_for(device))));
+    CHECK(links.calls == 2);
+    CHECK(controller.connected());
+
+    // A link that cannot be opened fails like a device, and the connection before it is closed.
+    REQUIRE(settings.device.assign("bt:00:11:22:33:44:55"));
+    links.failure = common::Status::kPermissionDenied;
+    CHECK(controller.connect(settings) == common::Status::kPermissionDenied);
+    CHECK(controller.connect_failure() == elm327::ConnectFailure::kOpen);
+    CHECK(!controller.connected());
+
+    // Without the opener, the link is taken for a serial device.
+    controller.set_link_opener(nullptr, nullptr);
+    CHECK(controller.connect(settings) == common::Status::kNotFound);
+    CHECK(links.calls == 3);
+}
+#endif
+
 TEST_CASE(controller_explanations) {
     const elm327::Response none{};
     CHECK(reason_of(elm327::explain_failure(common::Status::kInterrupted, none)) == "interrupted");
@@ -234,9 +315,18 @@ TEST_CASE(controller_explanations) {
     CHECK(reason_of(elm327::explain_failure(common::Status::kSystemError, bus)) == "CAN ERROR");
 #if defined(_WIN32)
     CHECK(reason_of(elm327::explain_open_failure(common::Status::kPermissionDenied)) == "permission denied");
+#elif defined(__ANDROID__)
+    // The device is a Bluetooth link.
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kPermissionDenied)) ==
+          "permission denied (allow the app to connect to nearby devices)");
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kNotRunning)) ==
+          "Bluetooth is off (turn Bluetooth on)");
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kTimeout)) ==
+          "the adapter does not accept the connection (is it plugged in, and no other device connected to it?)");
 #else
     CHECK(reason_of(elm327::explain_open_failure(common::Status::kPermissionDenied)) ==
           "permission denied (add your user to the dialout group)");
+    CHECK(reason_of(elm327::explain_open_failure(common::Status::kTimeout)) == "timed out");
 #endif
     CHECK(reason_of(elm327::explain_open_failure(common::Status::kResourceLimit)) == "in use by another program");
     CHECK(reason_of(elm327::explain_open_failure(common::Status::kNotSupported)) ==

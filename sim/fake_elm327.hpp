@@ -11,6 +11,10 @@
 /// pipe instead, which elm327::Adapter opens in place of a COM port, and serves one program at a
 /// time, as the pseudo-terminal does.
 ///
+/// Elsewhere it can answer on a socket pair instead (Transport::kSocket), whose other end goes to
+/// elm327::Adapter::open_stream(), as a Bluetooth link of the Android app does; the app's demo mode
+/// uses it that way.
+///
 /// It is the fixture of the tests and the heart of the elm327sim tool. Like the tests, it is
 /// development tooling outside the compliance scope of the library: it uses std::string,
 /// std::thread and the heap.
@@ -82,10 +86,17 @@ struct Behaviour final {
     bool silent{false};
 };
 
+/// Where FakeElm327 answers.
+enum class Transport : std::uint8_t {
+    kDevice,  ///< A pseudo-terminal (on Windows, a named pipe) that programs open by device_path().
+    kSocket,  ///< One end of a socket pair; take_stream() hands out the other one. Not on Windows.
+};
+
 class FakeElm327 final {
 public:
-    /// Creates the pseudo-terminal (the pipe) and starts answering on it.
-    explicit FakeElm327(Vehicle vehicle = example_vehicle(), Behaviour behaviour = Behaviour{});
+    /// Creates the pseudo-terminal (the pipe, or the socket pair) and starts answering on it.
+    explicit FakeElm327(Vehicle vehicle = example_vehicle(), Behaviour behaviour = Behaviour{},
+                        Transport transport = Transport::kDevice);
 
     /// Stops answering and removes the pseudo-terminal (the pipe).
     ~FakeElm327();
@@ -95,10 +106,17 @@ public:
     FakeElm327(FakeElm327&&) = delete;
     FakeElm327& operator=(FakeElm327&&) = delete;
 
-    /// @return true if the pseudo-terminal (the pipe) exists.
+    /// @return true if the pseudo-terminal (the pipe, the socket pair) exists.
     [[nodiscard]] bool valid() const;
 
+#if !defined(_WIN32)
+    /// Transport::kSocket: the other end of the socket pair, which the caller then owns, e.g. for
+    /// elm327::Adapter::open_stream(); -1 once it was taken, and for Transport::kDevice.
+    [[nodiscard]] int take_stream();
+#endif
+
     /// The device to open, e.g. "/dev/pts/3"; on Windows "\\\\.\\pipe\\elm327sim-<process>-<n>".
+    /// "socket" for Transport::kSocket, which has no device.
     [[nodiscard]] const std::string& device_path() const {
         return device_path_;
     }
@@ -113,8 +131,8 @@ public:
     /// empty if there is none.
     [[nodiscard]] std::vector<std::uint8_t> did_value(const std::string& header, std::uint16_t did) const;
 
-    /// Removes the pseudo-terminal (the pipe): for the program that has it open, the device
-    /// disappears.
+    /// Removes the pseudo-terminal (the pipe, or closes its end of the socket pair): for the program
+    /// that has it open, the device disappears.
     void hang_up();
 
 private:
@@ -160,7 +178,9 @@ private:
     void* pipe_{nullptr};   ///< The HANDLE of the pipe's server end.
     void* event_{nullptr};  ///< The HANDLE of a manual-reset event for the overlapped I/O on it.
 #else
-    int master_{-1};
+    int master_{-1};  ///< The master side of the pseudo-terminal, or this end of the socket pair.
+    int stream_{-1};  ///< Transport::kSocket: the other end, until take_stream().
+    bool socket_{false};
 #endif
     std::string device_path_{};
     std::atomic<bool> stop_{false};

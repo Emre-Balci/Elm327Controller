@@ -22,6 +22,9 @@
 #include "elm327/obd/service.hpp"
 #include "gui/gauge.hpp"
 #include "imgui.h"
+#if defined(__ANDROID__)
+#include "gui/android_bridge.hpp"
+#endif
 
 namespace elm327 {
 namespace gui {
@@ -47,6 +50,9 @@ constexpr std::array<const char*, kBaudRates.size()> kBaudNames{{
 #if defined(_WIN32)
 /// The COM ports looked for: USB and Bluetooth adapters get numbers up to here.
 constexpr std::uint32_t kMaxComPort{255U};
+#elif defined(__ANDROID__)
+/// The paired Bluetooth devices listed at most, leaving room for the simulator.
+constexpr std::size_t kMaxPaired{23U};
 #else
 /// The serial devices of USB adapters (FTDI, CH340 and PL2303 chips; CDC ACM) and of Bluetooth
 /// adapters bound with rfcomm, each with the numbers 0 to 7.
@@ -542,11 +548,13 @@ void App::draw_connection() noexcept {
             detect_devices();
         }
         for (std::size_t index{0U}; index < detected_count_; ++index) {
-            if (ImGui::Selectable(detected_[index].c_str())) {
-                fill(device_, detected_[index].text());
+            if (ImGui::Selectable(detected_[index].label.c_str())) {
+                fill(device_, detected_[index].device.text());
             }
         }
-        if (detected_count_ == 0U) {
+        if (!detected_hint_.empty()) {
+            show_disabled(detected_hint_);
+        } else if (detected_count_ == 0U) {
             show_disabled("No USB or Bluetooth serial device found.");
             show_disabled("Type the device, e.g. the one elm327sim prints.");
         }
@@ -1950,9 +1958,48 @@ void App::detect_devices() noexcept {
                                      0U) ||
                                     (::GetLastError() == ERROR_INSUFFICIENT_BUFFER))};
         if (exists) {
-            detected_[detected_count_] = name;
+            detected_[detected_count_].device = name;
+            static_cast<void>(detected_[detected_count_].label.assign(name.view()));  // Cannot fail: short.
             ++detected_count_;
         }
+    }
+}
+#elif defined(__ANDROID__)
+void App::detect_devices() noexcept {
+    // The paired Bluetooth devices, which an app reaches through the Java API only, and the simulator.
+    detected_count_ = 0U;
+    std::array<bridge::PairedDevice, kMaxPaired> paired{};
+    std::size_t count{0U};
+    const bridge::BluetoothState state{bridge::paired_devices(paired, count)};
+    for (std::size_t index{0U}; (index < count) && (detected_count_ < detected_.size()); ++index) {
+        Detected& detected{detected_[detected_count_]};
+        detected.label.clear();
+        detected.device.clear();
+        static_cast<void>(detected.label.append(paired[index].name.text()) && detected.label.append("  ") &&
+                          detected.label.append(paired[index].address.text()));
+        static_cast<void>(detected.device.append(bridge::kBluetoothPrefix) &&
+                          detected.device.append(paired[index].address.text()));
+        ++detected_count_;
+    }
+    if (detected_count_ < detected_.size()) {
+        Detected& simulator{detected_[detected_count_]};
+        static_cast<void>(simulator.label.assign("Simulator (demo, no car)"));  // Cannot fail: short.
+        static_cast<void>(simulator.device.assign(bridge::kSimulatorDevice));
+        ++detected_count_;
+    }
+    switch (state) {
+        case bridge::BluetoothState::kReady:
+            detected_hint_ = (count == 0U) ? "No paired adapter: pair it in the Bluetooth settings." : "";
+            break;
+        case bridge::BluetoothState::kOff:
+            detected_hint_ = "Bluetooth is off: turn it on to see the paired adapters.";
+            break;
+        case bridge::BluetoothState::kNoPermission:
+            detected_hint_ = "Allow the app to connect to nearby devices to see the paired adapters.";
+            break;
+        case bridge::BluetoothState::kNoBluetooth:
+            detected_hint_ = "This device has no Bluetooth.";
+            break;
     }
 }
 #else
@@ -1963,7 +2010,8 @@ void App::detect_devices() noexcept {
             common::StaticString<ConnectionSettings::kMaxDeviceLength> path{};
             const bool built{path.append(prefix) && path.append(number)};
             if (built && (::access(path.c_str(), F_OK) == 0) && (detected_count_ < detected_.size())) {
-                detected_[detected_count_] = path;
+                detected_[detected_count_].device = path;
+                static_cast<void>(detected_[detected_count_].label.assign(path.view()));  // Cannot fail: short.
                 ++detected_count_;
             }
         }

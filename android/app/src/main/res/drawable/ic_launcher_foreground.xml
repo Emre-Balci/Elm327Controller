@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A dial of the dashboard: its arc, the red zone and the needle, inside the safe zone of an
+     adaptive icon (the middle 66 of 108). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:pathData="M33,68 A23,23 0 1,1 75,68"
+        android:strokeColor="#FFE6E6E6"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M70.3,42.3 A23,23 0 0,1 75,68"
+        android:strokeColor="#FFE04B3A"
+        android:strokeWidth="5"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M54,58.6 L66,48.5"
+        android:strokeColor="#FFF2A33A"
+        android:strokeWidth="4"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M50,58.6 a4,4 0 1,0 8,0 a4,4 0 1,0 -8,0"
+        android:fillColor="#FFE6E6E6" />
+</vector>

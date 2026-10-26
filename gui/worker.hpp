@@ -244,6 +244,14 @@ public:
     /// Cancels what runs, ends the thread (which closes the connection) and waits for it.
     void stop() noexcept;
 
+#if !defined(_WIN32)
+    /// See Controller::set_link_opener(), e.g. the Android app's Bluetooth links. Call while the
+    /// thread does not run: the opener then runs on it, and cancel() ends its wait.
+    void set_link_opener(const LinkOpener opener, void* const context) noexcept {
+        controller_.set_link_opener(opener, context);
+    }
+#endif
+
     // The functions below are for one user-interface thread.
 
     /// Posts @p request. @return false if the queue is full or the worker does not run.

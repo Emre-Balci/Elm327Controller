@@ -45,11 +45,17 @@ Explanation explain_open_failure(const common::Status status) noexcept {
     switch (status) {
         case common::Status::kNotFound:
             explanation.reason = span_of("no such device");
+#if defined(__ANDROID__)
+            explanation.advice = "pair the adapter in the Bluetooth settings first";  // The app lists paired ones.
+#else
             explanation.advice = "choose the adapter's serial device";
+#endif
             break;
         case common::Status::kPermissionDenied:
             explanation.reason = span_of("permission denied");
-#if !defined(_WIN32)
+#if defined(__ANDROID__)
+            explanation.advice = "allow the app to connect to nearby devices";
+#elif !defined(_WIN32)
             explanation.advice = "add your user to the dialout group";  // Windows has no such group.
 #endif
             break;
@@ -62,17 +68,31 @@ Explanation explain_open_failure(const common::Status status) noexcept {
         case common::Status::kNotSupported:
             explanation.reason = span_of("the device does not accept the line settings");
             break;
+#if defined(__ANDROID__)
+        // A Bluetooth link: Bluetooth is off, or the adapter did not accept the connection.
+        case common::Status::kNotRunning:
+            explanation.reason = span_of("Bluetooth is off");
+            explanation.advice = "turn Bluetooth on";
+            break;
+        case common::Status::kTimeout:
+        case common::Status::kDisconnected:
+            explanation.reason = span_of("the adapter does not accept the connection");
+            explanation.advice = "is it plugged in, and no other device connected to it?";
+            break;
+#endif
         case common::Status::kOk:
         case common::Status::kSystemError:
         case common::Status::kInterrupted:
         case common::Status::kDeadlineMissed:
         case common::Status::kAlreadyRunning:
+#if !defined(__ANDROID__)
         case common::Status::kNotRunning:
+        case common::Status::kTimeout:
+        case common::Status::kDisconnected:
+#endif
         case common::Status::kOverflow:
         case common::Status::kAlreadyExists:
         case common::Status::kOutOfRange:
-        case common::Status::kTimeout:
-        case common::Status::kDisconnected:
             explanation.reason = describe(status);
             break;
     }
