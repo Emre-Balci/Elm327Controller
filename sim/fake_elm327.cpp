@@ -5,7 +5,10 @@
 #else
 #include <fcntl.h>
 #include <poll.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <stdlib.h>
+#include <sys/socket.h>
 #include <unistd.h>
 #endif
 
@@ -25,6 +28,16 @@ namespace sim {
 namespace {
 
 using namespace std::chrono_literals;
+
+#if !defined(_WIN32)
+/// The flags of send() on the socket pair: a closed other end is EPIPE rather than a SIGPIPE. macOS
+/// lacks MSG_NOSIGNAL and sets SO_NOSIGPIPE on the socket instead.
+#if defined(MSG_NOSIGNAL)
+constexpr int kSendFlags{MSG_NOSIGNAL};
+#else
+constexpr int kSendFlags{0};
+#endif
+#endif
 
 constexpr std::string_view kHexDigits{"0123456789ABCDEF"};
 constexpr std::string_view kProtocols{"0123456789ABC"};
@@ -214,8 +227,11 @@ Vehicle example_vehicle() {
 }
 
 #if defined(_WIN32)
-FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour)
+FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour, const Transport transport)
     : vehicle_{std::move(vehicle)}, behaviour_{std::move(behaviour)}, linefeeds_{behaviour_.linefeeds} {
+    if (transport != Transport::kDevice) {
+        return;  // Windows has no socket pairs here: valid() is false.
+    }
     const std::string name{"\\\\.\\pipe\\elm327sim-" + std::to_string(::GetCurrentProcessId()) + "-" +
                            std::to_string(g_next_pipe.fetch_add(1U))};
     // One instance, so that one program at a time has the simulated adapter, as with a serial port.
@@ -233,10 +249,31 @@ FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour)
     }
 }
 #else
-FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour)
-    : vehicle_{std::move(vehicle)}, behaviour_{std::move(behaviour)}, linefeeds_{behaviour_.linefeeds} {
-    master_ = ::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
-    if ((master_ >= 0) && (::grantpt(master_) == 0) && (::unlockpt(master_) == 0)) {
+FakeElm327::FakeElm327(Vehicle vehicle, Behaviour behaviour, const Transport transport)
+    : vehicle_{std::move(vehicle)},
+      behaviour_{std::move(behaviour)},
+      linefeeds_{behaviour_.linefeeds},
+      socket_{transport != Transport::kDevice} {
+    if (transport == Transport::kTcp) {
+        listen_tcp();
+    } else if (socket_) {
+        std::array<int, 2U> ends{{-1, -1}};
+        if (::socketpair(AF_UNIX, SOCK_STREAM, 0, ends.data()) == 0) {
+            master_ = ends[0U];
+            stream_ = ends[1U];
+            static_cast<void>(::fcntl(master_, F_SETFD, FD_CLOEXEC));
+            static_cast<void>(::fcntl(stream_, F_SETFD, FD_CLOEXEC));
+            static_cast<void>(::fcntl(master_, F_SETFL, ::fcntl(master_, F_GETFL) | O_NONBLOCK));
+#if defined(SO_NOSIGPIPE)
+            const int on{1};  // macOS: no MSG_NOSIGNAL, see send().
+            static_cast<void>(::setsockopt(master_, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on)));
+#endif
+            device_path_ = "socket";
+        }
+    } else {
+        master_ = ::posix_openpt(O_RDWR | O_NOCTTY | O_CLOEXEC);
+    }
+    if ((!socket_) && (master_ >= 0) && (::grantpt(master_) == 0) && (::unlockpt(master_) == 0)) {
         // Non-blocking: output nobody reads (the program closed the device) must not hang the thread.
         static_cast<void>(::fcntl(master_, F_SETFL, ::fcntl(master_, F_GETFL) | O_NONBLOCK));
         std::array<char, 128U> name{};
@@ -260,7 +297,47 @@ bool FakeElm327::valid() const {
 }
 #else
 bool FakeElm327::valid() const {
-    return (master_ >= 0) && (!device_path_.empty());
+    // With TCP, the listening socket tells: the connection (master_) belongs to the simulation thread.
+    return ((listener_ >= 0) || (master_ >= 0)) && (!device_path_.empty());
+}
+
+void FakeElm327::listen_tcp() {
+    listener_ = ::socket(AF_INET, SOCK_STREAM, 0);
+    sockaddr_in address{};
+    address.sin_family = AF_INET;
+    address.sin_port = 0;  // Any free port.
+    socklen_t size{sizeof(address)};
+    const bool listening{(listener_ >= 0) && (::inet_pton(AF_INET, "127.0.0.1", &address.sin_addr) == 1) &&
+                         (::bind(listener_, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0) &&
+                         (::listen(listener_, 1) == 0) &&
+                         (::getsockname(listener_, reinterpret_cast<sockaddr*>(&address), &size) == 0)};
+    if (listening) {
+        static_cast<void>(::fcntl(listener_, F_SETFD, FD_CLOEXEC));
+        device_path_ = "tcp:127.0.0.1:" + std::to_string(static_cast<unsigned>(ntohs(address.sin_port)));
+    }
+}
+
+void FakeElm327::accept_connection() {
+    pollfd entry{};
+    entry.fd = listener_;
+    entry.events = POLLIN;
+    if (::poll(&entry, 1U, 20) > 0) {
+        master_ = ::accept(listener_, nullptr, nullptr);
+        if (master_ >= 0) {
+            static_cast<void>(::fcntl(master_, F_SETFD, FD_CLOEXEC));
+            static_cast<void>(::fcntl(master_, F_SETFL, ::fcntl(master_, F_GETFL) | O_NONBLOCK));
+#if defined(SO_NOSIGPIPE)
+            const int on{1};  // macOS: no MSG_NOSIGNAL, see send().
+            static_cast<void>(::setsockopt(master_, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on)));
+#endif
+        }
+    }
+}
+
+int FakeElm327::take_stream() {
+    const int stream{stream_};
+    stream_ = -1;
+    return stream;
 }
 #endif
 
@@ -377,11 +454,23 @@ void FakeElm327::hang_up() {
         static_cast<void>(::close(master_));
         master_ = -1;
     }
+    if (stream_ >= 0) {
+        static_cast<void>(::close(stream_));  // Nobody took it.
+        stream_ = -1;
+    }
+    if (listener_ >= 0) {
+        static_cast<void>(::close(listener_));
+        listener_ = -1;
+    }
 }
 
 void FakeElm327::run() {
     std::array<char, 256U> buffer{};
     while (!stop_.load()) {
+        if ((listener_ >= 0) && (master_ < 0)) {
+            accept_connection();
+            continue;
+        }
         pollfd entry{};
         entry.fd = master_;
         entry.events = POLLIN;
@@ -390,8 +479,13 @@ void FakeElm327::run() {
         const ssize_t count{readable ? ::read(master_, buffer.data(), buffer.size()) : ssize_t{0}};
         if (count > 0) {
             receive(buffer.data(), static_cast<std::size_t>(count));
+        } else if ((ready > 0) && (listener_ >= 0)) {
+            // The program closed the connection: wait for the next one.
+            static_cast<void>(::close(master_));
+            master_ = -1;
         } else if (ready > 0) {
-            // No program has the device open: the master reports a hang-up until one opens it.
+            // No program has the device open: the master reports a hang-up until one opens it. (The
+            // other end of a socket pair stays closed.)
             std::this_thread::sleep_for(10ms);
         } else {
             // Nothing arrived.
@@ -815,7 +909,8 @@ void FakeElm327::send(const std::string& text) const {
 void FakeElm327::send(const std::string& text) const {
     std::size_t written{0U};
     for (int attempt{0}; (written < text.size()) && (attempt < kSendAttempts); ++attempt) {
-        const ssize_t count{::write(master_, text.data() + written, text.size() - written)};
+        const ssize_t count{socket_ ? ::send(master_, text.data() + written, text.size() - written, kSendFlags)
+                                    : ::write(master_, text.data() + written, text.size() - written)};
         if (count > 0) {
             written += static_cast<std::size_t>(count);
         } else if ((count < 0) && (errno == EAGAIN)) {

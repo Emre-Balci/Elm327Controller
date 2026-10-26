@@ -1,0 +1,40 @@
+# Builds and tests the macOS and iOS code on a Mac, which the development machine lacks (there, the
+# `portable` preset tests the shared POSIX code on Linux). Run it by hand: Actions > Apple > Run
+# workflow. macOS runners count ten times against the Actions minutes of a private repository.
+#
+# The Common submodule is a private repository: the secret SUBMODULE_TOKEN holds a token that can
+# read it (a fine-grained personal access token with read access to Emre-Balci/Common's contents).
+name: Apple
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.SUBMODULE_TOKEN }}
+      - name: Install Ninja and GLFW
+        run: brew install ninja glfw
+      - name: Common (debug)
+        working-directory: third_party/common
+        run: cmake --preset macos-debug && cmake --build --preset macos-debug && ctest --preset macos-debug
+      - name: Elm327Controller (debug)
+        run: cmake --preset macos-debug && cmake --build --preset macos-debug && ctest --preset macos-debug
+      - name: Elm327Controller (release)
+        run: cmake --preset macos-release && cmake --build --preset macos-release && ctest --preset macos-release
+
+  ios:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          token: ${{ secrets.SUBMODULE_TOKEN }}
+      - name: The iOS app, unsigned
+        run: |
+          cmake --preset ios -DCMAKE_XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED=NO
+          cmake --build --preset ios

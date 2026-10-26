@@ -14,6 +14,10 @@
 ///
 /// Serial I/O blocks in the kernel, so nothing here is safe on the real-time path: use an Adapter
 /// on a non-real-time thread, as common::SerialPort requires.
+///
+/// Besides a serial device, an Adapter can talk over a connected stream socket (open_stream(), not
+/// on Windows): how the Android app reaches a Bluetooth adapter, through a bridge to the Java API.
+/// And it connects to adapters on Wi-Fi itself, by their IP address ("tcp:...", see open()).
 
 #ifndef ELM327_ADAPTER_ADAPTER_HPP
 #define ELM327_ADAPTER_ADAPTER_HPP
@@ -35,6 +39,13 @@
 
 namespace elm327 {
 
+/// A device that is an adapter on Wi-Fi: "tcp:" followed by its IP address and port, e.g.
+/// "tcp:192.168.0.10:35000", or "tcp:[fe80::1%wlan0]:35000" for IPv6 (see Adapter::open()).
+inline constexpr std::string_view kTcpPrefix{"tcp:"};
+
+/// The address of most Wi-Fi adapters, which are their own access point.
+inline constexpr std::string_view kDefaultWifiDevice{"tcp:192.168.0.10:35000"};
+
 /// What a TraceFunction is told about.
 enum class TraceEvent : std::uint8_t {
     kCommand,  ///< A command sent to the adapter, without its "\r".
@@ -53,6 +64,9 @@ struct Timeouts final {
     common::Duration command{std::chrono::seconds{5}};
     /// A reset (ATZ), which takes an ELM327 about one second.
     common::Duration reset{std::chrono::seconds{5}};
+    /// Opening a link that is not a serial device, e.g. a Bluetooth connection, which can take
+    /// several seconds (see Controller::set_link_opener()).
+    common::Duration link{std::chrono::seconds{15}};
     /// The first OBD request after a reset. With automatic protocol selection the adapter first
     /// tries the protocols one after the other ("SEARCHING..."), which can take over ten seconds.
     common::Duration connect{std::chrono::seconds{30}};
@@ -101,9 +115,26 @@ public:
     /// Opens the serial device @p path, e.g. "/dev/ttyUSB0" (USB) or "/dev/rfcomm0" (Bluetooth); on
     /// Windows a COM port, e.g. "COM3", or a named pipe ("\\\\.\\pipe\\<name>"), which elm327sim
     /// offers there in place of the pseudo-terminal it uses on Linux.
+    ///
+    /// Except on Windows, @p path can also be an adapter on Wi-Fi (kTcpPrefix), e.g.
+    /// "tcp:192.168.0.10:35000": it connects to it within options.timeouts.link, and gives up once the
+    /// cancel descriptor is readable. The address is numeric, so no name server is asked (a lookup
+    /// could not be cancelled). The connection is then read and written as open_stream() does.
     /// @return the errors of common::SerialPort::open(), e.g. kNotFound, kPermissionDenied (not in
-    ///         the dialout group) or kResourceLimit (in use by another program).
+    ///         the dialout group) or kResourceLimit (in use by another program). For Wi-Fi:
+    ///         kInvalidArgument (not an IP address and port), kDisconnected (refused or unreachable),
+    ///         kTimeout or kInterrupted.
     common::Status open(const char* path, const AdapterOptions& options) noexcept;
+
+#if !defined(_WIN32)
+    /// Takes over @p stream, a connected stream socket that leads to an adapter, e.g. the Android
+    /// app's bridge to a Bluetooth adapter. It is read and written like a serial device, without
+    /// line settings (options.serial does not apply), and close() closes it. The peer closing its
+    /// end is kDisconnected, like an unplugged device. Not on Windows.
+    /// @return kOk; kInvalidArgument for kInvalidNativeHandle, or while the Adapter is open (@p stream
+    ///         is closed then, too); kSystemError if it cannot be made non-blocking.
+    common::Status open_stream(common::NativeHandle stream, const AdapterOptions& options) noexcept;
+#endif
 
     /// Closes the serial device. @return kOk, or the error of common::SerialPort::close().
     common::Status close() noexcept;
@@ -112,7 +143,7 @@ public:
 #if defined(_WIN32)
         return port_.is_open() || (pipe_ != common::kInvalidNativeHandle);
 #else
-        return port_.is_open();
+        return port_.is_open() || (stream_ != common::kInvalidNativeHandle);
 #endif
     }
 
@@ -187,6 +218,11 @@ private:
     /// Opens the device; see open().
     common::Status open_device(const char* path, const common::SerialOptions& options) noexcept;
 
+#if !defined(_WIN32)
+    /// Makes @p stream the device; see open_stream().
+    common::Status adopt_stream(common::NativeHandle stream) noexcept;
+#endif
+
     /// Closes the device; see close().
     common::Status close_device() noexcept;
 
@@ -227,6 +263,9 @@ private:
     common::NativeHandle pipe_{common::kInvalidNativeHandle};
     /// Manual-reset event of the overlapped reads, and of the writes to a pipe; created by open().
     common::NativeHandle event_{common::kInvalidNativeHandle};
+#else
+    /// The stream socket open in place of port_ (see open_stream()), or kInvalidNativeHandle.
+    common::NativeHandle stream_{common::kInvalidNativeHandle};
 #endif
     /// The last command ended before the adapter's prompt: the adapter may still be answering it.
     bool unsettled_{false};

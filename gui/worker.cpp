@@ -1,12 +1,5 @@
 #include "gui/worker.hpp"
 
-#if defined(_WIN32)
-#include <windows.h>
-#else
-#include <sys/eventfd.h>
-#include <unistd.h>
-#endif
-
 #include <array>
 #include <chrono>
 #include <cstddef>
@@ -38,52 +31,6 @@ constexpr std::array<DtcKind, 3U> kDtcKinds{{DtcKind::kStored, DtcKind::kPending
 
 common::Span<const char> span_of(const std::string_view text) noexcept {
     return common::Span<const char>{text.data(), text.size()};
-}
-
-/// Creates an eventfd (on Windows, a manual-reset event) that is not readable yet.
-/// @return it; kInvalidNativeHandle if it cannot be created.
-common::NativeHandle create_event() noexcept {
-#if defined(_WIN32)
-    return ::CreateEventW(nullptr, TRUE, FALSE, nullptr);  // nullptr on failure.
-#else
-    const int flags{
-        static_cast<int>(static_cast<std::uint32_t>(EFD_CLOEXEC) | static_cast<std::uint32_t>(EFD_NONBLOCK))};
-    return ::eventfd(0U, flags);  // -1 on failure.
-#endif
-}
-
-/// Closes the event @p descriptor, if it is open.
-void close_event(common::NativeHandle& descriptor) noexcept {
-    if (descriptor != common::kInvalidNativeHandle) {
-#if defined(_WIN32)
-        static_cast<void>(::CloseHandle(descriptor));
-#else
-        static_cast<void>(::close(descriptor));
-#endif
-        descriptor = common::kInvalidNativeHandle;
-    }
-}
-
-/// Makes the event @p descriptor unreadable again.
-void drain(const common::NativeHandle descriptor) noexcept {
-#if defined(_WIN32)
-    static_cast<void>(::ResetEvent(descriptor));
-#else
-    std::uint64_t value{0U};
-    const ssize_t count{::read(descriptor, &value, sizeof(value))};
-    static_cast<void>(count);  // Nothing to drain is fine.
-#endif
-}
-
-/// Makes the event @p descriptor readable.
-void notify_event(const common::NativeHandle descriptor) noexcept {
-#if defined(_WIN32)
-    static_cast<void>(::SetEvent(descriptor));
-#else
-    const std::uint64_t one{1U};
-    const ssize_t count{::write(descriptor, &one, sizeof(one))};
-    static_cast<void>(count);  // Fails only when the counter is about to overflow: it is readable then.
-#endif
 }
 
 /// Appends as much of @p part to @p text as fits: a message cut short beats no message.
@@ -158,17 +105,15 @@ Worker::~Worker() {
 common::Status Worker::start(const NotifyFunction notify, void* const context) noexcept {
     common::Status status{running_ ? common::Status::kAlreadyRunning : common::Status::kOk};
     if (is_ok(status)) {
-        wake_descriptor_ = create_event();
-        cancel_descriptor_ = create_event();
-        status = ((wake_descriptor_ != common::kInvalidNativeHandle) &&
-                  (cancel_descriptor_ != common::kInvalidNativeHandle))
-                     ? common::Status::kOk
-                     : common::Status::kResourceLimit;
+        status = wake_.open();
+        if (is_ok(status)) {
+            status = cancel_.open();
+        }
     }
     if (is_ok(status)) {
         notify_ = notify;
         notify_context_ = context;
-        controller_.set_cancel_descriptor(cancel_descriptor_);
+        controller_.set_cancel_descriptor(cancel_.descriptor());
         controller_.set_trace(&trace_traffic, this);
         stopping_ = false;
         publish();  // The first State, before the thread that writes the others starts.
@@ -205,8 +150,8 @@ void Worker::stop() noexcept {
 }
 
 void Worker::close_descriptors() noexcept {
-    close_event(wake_descriptor_);
-    close_event(cancel_descriptor_);
+    wake_.close();
+    cancel_.close();
 }
 
 bool Worker::post(const Request& request) noexcept {
@@ -216,7 +161,7 @@ bool Worker::post(const Request& request) noexcept {
         copy.generation = generation_.load(std::memory_order_acquire);
         posted = requests_.try_push(copy);
         if (posted) {
-            notify_event(wake_descriptor_);
+            wake_.signal();
         }
     }
     return posted;
@@ -231,8 +176,8 @@ bool Worker::post(const RequestKind kind) noexcept {
 void Worker::cancel() noexcept {
     if (running_) {
         static_cast<void>(generation_.fetch_add(1U, std::memory_order_acq_rel));
-        notify_event(cancel_descriptor_);  // Interrupts the operation in progress.
-        notify_event(wake_descriptor_);    // Ends the wait of a monitor.
+        cancel_.signal();  // Interrupts the operation in progress.
+        wake_.signal();    // Ends the wait of a monitor.
     }
 }
 
@@ -267,9 +212,9 @@ void Worker::run() noexcept {
                                                               : common::Deadline::after(kIdleWait)};
             if ((!stopping_) && requests_.empty_approx()) {
                 // A request posted since the check makes the descriptor readable: no wake-up is lost.
-                static_cast<void>(wait_until(wake_descriptor_, deadline));
+                static_cast<void>(wait_until(wake_.descriptor(), deadline));
             }
-            drain(wake_descriptor_);
+            wake_.clear();
         }
     }
     controller_.disconnect();
@@ -350,7 +295,8 @@ void Worker::connect(const ConnectionSettings& settings, const bool read_only) n
             read_pids();
         }
     } else {
-        const Explanation explanation{explain_connect_failure(controller_.connect_failure(), status)};
+        const Explanation explanation{
+            explain_connect_failure(controller_.connect_failure(), status, settings.device.view())};
         put(text, "Cannot connect to ");
         put(text, settings.device.text());
         put(text, ": ");
@@ -745,7 +691,7 @@ void Worker::forget() noexcept {
 
 void Worker::begin(const Activity activity) noexcept {
     // A cancel() before this operation was meant for an earlier one.
-    drain(cancel_descriptor_);
+    cancel_.clear();
     state_.activity = activity;
     publish();
 }

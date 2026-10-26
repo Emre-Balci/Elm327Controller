@@ -43,6 +43,10 @@ namespace elm327 {
 #if defined(_WIN32)
 /// The usual COM port of the first USB serial adapter: COM1 and COM2 are kept for built-in ports.
 inline constexpr std::string_view kDefaultDevice{"COM3"};
+#elif defined(__APPLE__)
+/// macOS names a USB serial adapter after its chip and serial number, e.g. /dev/cu.usbserial-A50285BI
+/// (FTDI): this is the start of the name; the GUI lists the devices there are.
+inline constexpr std::string_view kDefaultDevice{"/dev/cu.usbserial"};
 #else
 /// The first USB serial adapter: FTDI, CH340 and PL2303 chips appear as /dev/ttyUSB<n>.
 inline constexpr std::string_view kDefaultDevice{"/dev/ttyUSB0"};
@@ -57,7 +61,8 @@ struct ConnectionSettings final {
     ConnectionSettings() noexcept;
 
     /// Serial device, e.g. "/dev/ttyUSB0" (USB) or "/dev/rfcomm0" (Bluetooth); on Windows a COM
-    /// port, e.g. "COM3".
+    /// port, e.g. "COM3". Or a link that the LinkOpener of the Controller opens, e.g. "bt:<address>"
+    /// for a Bluetooth adapter in the Android app.
     common::StaticString<kMaxDeviceLength> device{};
     common::BaudRate baud_rate{common::BaudRate::k38400};
     /// ELM327 protocol number: '0' (automatic), '1' to '9', 'A' to 'C' (see is_valid_protocol()).
@@ -104,6 +109,24 @@ inline constexpr std::size_t kMaxReadingText{3U * PidReading::kMaxData};
 [[nodiscard]] common::Result<std::size_t> format_reading(const PidReading& reading, bool with_unit, char separator,
                                                          common::Span<char> out) noexcept;
 
+/// The devices of Bluetooth adapters that a LinkOpener opens: "bt:" followed by the address of a
+/// paired Bluetooth (classic) adapter, as in the Android app, e.g. "bt:00:1D:A5:68:98:8B"; "ble:"
+/// followed by the identifier of a Bluetooth Low Energy adapter, as in the iOS app.
+inline constexpr std::string_view kBluetoothPrefix{"bt:"};
+inline constexpr std::string_view kBluetoothLowEnergyPrefix{"ble:"};
+
+#if !defined(_WIN32)
+/// Opens the link to an adapter that is not a serial device, e.g. a Bluetooth adapter through the
+/// Android app's bridge to the Java API, for Controller::connect(). It waits at most until
+/// @p deadline, and gives up once @p cancel is readable (kInvalidNativeHandle for none).
+/// @return a connected stream socket to the adapter, which the Controller then owns (see
+///         Adapter::open_stream()); kNotSupported for a @p device that is not such a link, which
+///         Controller::connect() then opens as a serial device; otherwise why the link could not be
+///         opened, e.g. kNotFound, kPermissionDenied, kTimeout or kInterrupted.
+using LinkOpener = common::Result<common::NativeHandle> (*)(const char* device, const common::Deadline& deadline,
+                                                            common::NativeHandle cancel, void* context) noexcept;
+#endif
+
 /// An ELM327 adapter, connected or not, and the vehicle behind it.
 ///
 /// The object embeds the Adapter, the ObdClient and their buffers (about 20 KiB) and never
@@ -119,10 +142,11 @@ public:
 
     /// Closes any earlier connection, opens settings.device and initializes the adapter (see
     /// Adapter::initialize()). On failure the device is closed again and connect_failure() tells
-    /// which step failed.
-    /// @return kOk; the errors of Adapter::open() (ConnectFailure::kOpen); kTimeout when the adapter
-    ///         does not answer (ConnectFailure::kNoAnswer); otherwise the errors of
-    ///         Adapter::initialize() (ConnectFailure::kInitialize).
+    /// which step failed. With a LinkOpener (see set_link_opener()), it is asked first, and opens
+    /// the device when it is a link, within settings.timeouts.link.
+    /// @return kOk; the errors of Adapter::open() or the LinkOpener (ConnectFailure::kOpen);
+    ///         kTimeout when the adapter does not answer (ConnectFailure::kNoAnswer); otherwise the
+    ///         errors of Adapter::initialize() (ConnectFailure::kInitialize).
     common::Status connect(const ConnectionSettings& settings) noexcept;
 
     /// Closes the connection, if there is one.
@@ -149,10 +173,20 @@ public:
     }
 
     /// See Adapter::set_cancel_descriptor(): once @p descriptor is readable (on Windows, signaled),
-    /// operations end with kInterrupted.
+    /// operations end with kInterrupted. It also ends the wait of a LinkOpener.
     void set_cancel_descriptor(const common::NativeHandle descriptor) noexcept {
+        cancel_descriptor_ = descriptor;
         adapter_.set_cancel_descriptor(descriptor);
     }
+
+#if !defined(_WIN32)
+    /// Installs @p opener for the devices that are links rather than serial devices; nullptr, the
+    /// default, removes it. It runs on the thread that calls connect(). Not on Windows.
+    void set_link_opener(LinkOpener opener, void* context) noexcept {
+        link_opener_ = opener;
+        link_context_ = context;
+    }
+#endif
 
     /// See Adapter::set_trace().
     void set_trace(TraceFunction function, void* context) noexcept {
@@ -255,8 +289,16 @@ private:
     /// @return @p status.
     common::Status checked(common::Status status, const Response& response) noexcept;
 
+    /// Opens settings.device as a link or as a serial device; see connect().
+    common::Status open(const ConnectionSettings& settings, const AdapterOptions& options) noexcept;
+
     Adapter adapter_{};
     ObdClient obd_;
+    common::NativeHandle cancel_descriptor_{common::kInvalidNativeHandle};
+#if !defined(_WIN32)
+    LinkOpener link_opener_{nullptr};
+    void* link_context_{nullptr};
+#endif
     Response response_{};  ///< Replies to query().
     ConnectionSettings settings_{};
     ConnectFailure failure_{ConnectFailure::kNone};

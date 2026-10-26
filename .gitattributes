@@ -1,2 +1,5 @@
 # Sources are edited on Windows and built in WSL: keep LF everywhere.
 * text=auto eol=lf
+# Except what Windows runs (Gradle's wrapper script), and binaries.
+*.bat text eol=crlf
+*.jar binary

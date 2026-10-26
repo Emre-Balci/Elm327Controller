@@ -171,8 +171,12 @@ private:
     void send_command() noexcept;
     /// Restarts the histories for the PIDs in @p pids.
     void reset_histories(const common::ByteSet& pids) noexcept;
-    /// Lists the serial devices that exist, for the combo next to the device field.
+    /// Lists the serial devices that exist, for the combo next to the device field; in the apps, the
+    /// Bluetooth adapters, a Wi-Fi adapter and the simulator.
     void detect_devices() noexcept;
+    /// Adds a Wi-Fi adapter at its usual address and the simulator (device @p simulator) to the list,
+    /// as the apps offer them.
+    void add_wifi_and_simulator(std::string_view simulator) noexcept;
     [[nodiscard]] std::size_t selected_count() const noexcept;
     /// The selected PIDs: monitored, plotted, and shown in widget mode.
     [[nodiscard]] common::ByteSet selection() const noexcept;
@@ -189,8 +193,15 @@ private:
     bool read_only_{false};  ///< Connect in read-only mode; toggled by the connection bar.
     std::array<common::StaticString<64U>, 13U> protocol_labels_{};
     std::array<const char*, 13U> protocol_items_{};
-    std::array<common::StaticString<ConnectionSettings::kMaxDeviceLength>, 24U> detected_{};
+    /// A device the list next to the device field offers: what it shows, and what it fills in.
+    struct Detected final {
+        common::StaticString<96U> label{};
+        common::StaticString<ConnectionSettings::kMaxDeviceLength> device{};
+    };
+    std::array<Detected, 24U> detected_{};
     std::size_t detected_count_{0U};
+    /// Why the list is short, e.g. "Bluetooth is off."; empty when there is nothing to tell.
+    std::string_view detected_hint_{};
     common::Duration timeout_{std::chrono::seconds{5}};
 
     // Live data.

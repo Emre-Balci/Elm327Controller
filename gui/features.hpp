@@ -4,7 +4,9 @@
 /// The Features tab lists the features of two sets of definitions (see expert::parse_features()):
 /// the ones built in for elm327sim's simulated car, so that the tab can be tried without a car, and
 /// the user's own file, by default features.ini in the configuration directory
-/// ~/.config/elm327controller (on Windows, %APPDATA%\elm327controller). Every change the tab makes
+/// ~/.config/elm327controller (on Windows, %APPDATA%\elm327controller; on Android, the app's
+/// directory on the shared storage, Android/data/<app>/files; on iOS, the app's Documents, which the
+/// Files app shows). Every change the tab makes
 /// is appended to backups.txt in that directory, with the setting's value before and after, so that
 /// it can be restored even after the program has ended (with the Expert tab, or by hand).
 
@@ -39,9 +41,34 @@ inline constexpr char kPathSeparator{'/'};
 
 /// The directory of the user's definitions and backups, ~/.config/elm327controller, with the home
 /// directory from the password database (not the environment). On Windows it is elm327controller in
-/// the user's roaming application data, the known folder that %APPDATA% names.
+/// the user's roaming application data, the known folder that %APPDATA% names. The directory that
+/// set_config_directory() gave comes first (on Android, there is no other).
 /// @return kOk; kNotFound when the home directory is unknown; kOutOfRange when the path is too long.
 [[nodiscard]] common::Status config_directory(Path& directory) noexcept;
+
+/// Gives config_directory() a directory in place of the system's: the apps give theirs, where a
+/// person can put features.ini and find backups.txt (Android: ANativeActivity::externalDataPath,
+/// reached over USB; iOS: the app's Documents, in the Files app). An empty @p directory goes back to
+/// the system's. Call it at the start, before anything asks.
+/// @return kOk; kOutOfRange when @p directory is too long (it then goes back to the system's).
+common::Status set_config_directory(std::string_view directory) noexcept;
+
+/// The definitions of the Features tab, as load_definitions() found them.
+struct Definitions final {
+    expert::FeatureList features{};
+    /// Where they come from, e.g. "4 built in for elm327sim, 2 from <path>", or where the user's
+    /// file goes when there is none yet.
+    common::StaticString<256U> source{};
+    /// What is wrong with the user's file, e.g. "<path>: line 3: unknown key"; empty if nothing.
+    common::StaticString<256U> problem{};
+    /// The configuration directory, where changes are recorded; empty when there is none.
+    Path directory{};
+};
+
+/// Loads the definitions of the Features tab into @p definitions: the simulator's, built in, then
+/// the user's from @p file, or from features.ini in the configuration directory when @p file is
+/// nullptr. The user's file is read into a buffer of static storage: call from one thread only.
+void load_definitions(const char* file, Definitions& definitions) noexcept;
 
 /// Reads the definitions in the file @p path into @p buffer and appends their features to
 /// @p features.

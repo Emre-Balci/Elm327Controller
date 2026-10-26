@@ -113,8 +113,10 @@ constexpr std::array<std::string_view, 32U> kUsage{{
     "Options:",
 #if defined(_WIN32)
     "  -d, --device PATH   serial device (default COM3)",
+#elif defined(__APPLE__)
+    "  -d, --device PATH   serial device, e.g. /dev/cu.usbserial-A50285BI, or tcp:IP:PORT (Wi-Fi)",
 #else
-    "  -d, --device PATH   serial device (default /dev/ttyUSB0)",
+    "  -d, --device PATH   serial device (default /dev/ttyUSB0), or tcp:IP:PORT (Wi-Fi)",
 #endif
     "  -b, --baud RATE     bit rate (default 38400)",
     "  -p, --protocol N    OBD protocol 0-9 or A-C (default 0: automatic)",
@@ -153,7 +155,7 @@ constexpr std::array<std::string_view, 40U> kShellHelp{{
 #if defined(_WIN32)
     "  device PATH       serial device, a COM port such as COM3",
 #else
-    "  device PATH       serial device, e.g. /dev/ttyUSB0 or /dev/rfcomm0",
+    "  device PATH       serial device, e.g. /dev/ttyUSB0 or /dev/rfcomm0; tcp:IP:PORT for Wi-Fi",
 #endif
     "  baud RATE         bit rate, e.g. 38400, 9600 or 115200",
     "  protocol N        OBD protocol 0-9 or A-C (0: automatic)",

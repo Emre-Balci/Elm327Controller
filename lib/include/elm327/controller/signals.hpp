@@ -11,7 +11,9 @@
 /// An interactive program goes on after Ctrl+C instead: take_stop_request() makes the descriptor
 /// unreadable again once the interrupted command has ended.
 ///
-/// No signal handler is involved, so nothing has to be async-signal-safe.
+/// No signal handler is involved, so nothing has to be async-signal-safe. macOS and iOS have no
+/// signalfd: there StopSignals installs a handler for the stop signals, which writes the number of
+/// each into a pipe, the descriptor, and puts the earlier handlers back when it closes.
 ///
 /// Windows has no such signals, but console control events, which a handler function receives on a
 /// thread of its own. There StopSignals installs that handler, which records the event and signals a
@@ -47,8 +49,9 @@ public:
 
     /// Blocks the signals for the calling thread and opens the descriptor. Call it before any other
     /// thread starts, so that all threads inherit the blocked signals.
-    /// @return kOk; kInvalidArgument if it is open already (on Windows, also when another StopSignals
-    ///         is open, since a process has one set of console handlers); kSystemError if a call failed.
+    /// @return kOk; kInvalidArgument if it is open already (on Windows, macOS and iOS, also when
+    ///         another StopSignals is open, since a process has one set of handlers); kSystemError if
+    ///         a call failed.
     common::Status open() noexcept;
 
     /// The descriptor, readable once a signal has arrived (on Windows, the event, signaled then);
@@ -65,11 +68,10 @@ private:
     std::int32_t signal_{0};
 };
 
-/// Takes the stop requests pending on @p descriptor, the descriptor of a StopSignals or an eventfd
-/// (as the tests and the GUI use; on Windows, a manual-reset event), so that it is no longer
-/// readable. Does not wait.
+/// Takes the stop requests pending on @p descriptor, the descriptor of a StopSignals or an Event (as
+/// the tests and the GUI use), so that it is no longer readable. Does not wait.
 /// @return the signal that was pending: one that ends a program (see ends_program()) when one of
-///         them was; otherwise SIGINT for a SIGINT or an eventfd; 0 if nothing was pending.
+///         them was; otherwise SIGINT for a SIGINT or an Event; 0 if nothing was pending.
 [[nodiscard]] std::int32_t take_stop_request(common::NativeHandle descriptor) noexcept;
 
 /// @return true for the signals after which an interactive program ends instead of going on:

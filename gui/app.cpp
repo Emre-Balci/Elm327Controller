@@ -22,6 +22,16 @@
 #include "elm327/obd/service.hpp"
 #include "gui/gauge.hpp"
 #include "imgui.h"
+#if defined(__ANDROID__)
+#include "gui/android_bridge.hpp"
+#elif defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IOS
+#include "gui/ios_bridge.hpp"
+#else
+#include <dirent.h>
+#endif
+#endif
 
 namespace elm327 {
 namespace gui {
@@ -47,11 +57,33 @@ constexpr std::array<const char*, kBaudRates.size()> kBaudNames{{
 #if defined(_WIN32)
 /// The COM ports looked for: USB and Bluetooth adapters get numbers up to here.
 constexpr std::uint32_t kMaxComPort{255U};
+#elif defined(__ANDROID__)
+/// The paired Bluetooth devices listed at most, leaving room for a Wi-Fi adapter and the simulator.
+constexpr std::size_t kMaxPaired{22U};
+#elif defined(__APPLE__)
+#if TARGET_OS_IOS
+/// The Bluetooth Low Energy adapters listed at most, leaving room for a Wi-Fi adapter and the
+/// simulator.
+constexpr std::size_t kMaxFound{22U};
+#else
+/// Entries of /dev looked at for serial devices at most: a few hundred are there.
+constexpr std::size_t kMaxDeviceEntries{4096U};
+/// The serial devices of macOS start so; the console's and the Bluetooth listener's are no adapters.
+constexpr std::string_view kSerialPrefix{"cu."};
+constexpr std::array<std::string_view, 2U> kNotAdapters{{"cu.Bluetooth-Incoming-Port", "cu.debug-console"}};
+#endif
 #else
 /// The serial devices of USB adapters (FTDI, CH340 and PL2303 chips; CDC ACM) and of Bluetooth
 /// adapters bound with rfcomm, each with the numbers 0 to 7.
 constexpr std::array<std::string_view, 3U> kDevicePrefixes{{"/dev/ttyUSB", "/dev/ttyACM", "/dev/rfcomm"}};
 constexpr std::string_view kDeviceNumbers{"01234567"};
+#endif
+
+#if defined(__APPLE__) && TARGET_OS_IOS
+/// The device list follows the scan for Bluetooth adapters while it is open.
+constexpr bool kRefreshDevices{true};
+#else
+constexpr bool kRefreshDevices{false};
 #endif
 
 /// The interval of a monitor, in ms.
@@ -538,15 +570,17 @@ void App::draw_connection() noexcept {
     }
     ImGui::SameLine(0.0F, 0.0F);
     if (ImGui::BeginCombo("##detected", nullptr, ImGuiComboFlags_NoPreview)) {
-        if (ImGui::IsWindowAppearing()) {
+        if (ImGui::IsWindowAppearing() || kRefreshDevices) {
             detect_devices();
         }
         for (std::size_t index{0U}; index < detected_count_; ++index) {
-            if (ImGui::Selectable(detected_[index].c_str())) {
-                fill(device_, detected_[index].text());
+            if (ImGui::Selectable(detected_[index].label.c_str())) {
+                fill(device_, detected_[index].device.text());
             }
         }
-        if (detected_count_ == 0U) {
+        if (!detected_hint_.empty()) {
+            show_disabled(detected_hint_);
+        } else if (detected_count_ == 0U) {
             show_disabled("No USB or Bluetooth serial device found.");
             show_disabled("Type the device, e.g. the one elm327sim prints.");
         }
@@ -1950,11 +1984,112 @@ void App::detect_devices() noexcept {
                                      0U) ||
                                     (::GetLastError() == ERROR_INSUFFICIENT_BUFFER))};
         if (exists) {
-            detected_[detected_count_] = name;
+            detected_[detected_count_].device = name;
+            static_cast<void>(detected_[detected_count_].label.assign(name.view()));  // Cannot fail: short.
             ++detected_count_;
         }
     }
 }
+#elif defined(__ANDROID__)
+void App::detect_devices() noexcept {
+    // The paired Bluetooth devices, which an app reaches through the Java API only, the usual address
+    // of a Wi-Fi adapter, and the simulator.
+    detected_count_ = 0U;
+    std::array<bridge::PairedDevice, kMaxPaired> paired{};
+    std::size_t count{0U};
+    const bridge::BluetoothState state{bridge::paired_devices(paired, count)};
+    for (std::size_t index{0U}; (index < count) && (detected_count_ < detected_.size()); ++index) {
+        Detected& detected{detected_[detected_count_]};
+        detected.label.clear();
+        detected.device.clear();
+        static_cast<void>(detected.label.append(paired[index].name.text()) && detected.label.append("  ") &&
+                          detected.label.append(paired[index].address.text()));
+        static_cast<void>(detected.device.append(kBluetoothPrefix) &&
+                          detected.device.append(paired[index].address.text()));
+        ++detected_count_;
+    }
+    add_wifi_and_simulator(bridge::kSimulatorDevice);
+    switch (state) {
+        case bridge::BluetoothState::kReady:
+            detected_hint_ = (count == 0U) ? "No paired adapter: pair it in the Bluetooth settings." : "";
+            break;
+        case bridge::BluetoothState::kOff:
+            detected_hint_ = "Bluetooth is off: turn it on to see the paired adapters.";
+            break;
+        case bridge::BluetoothState::kNoPermission:
+            detected_hint_ = "Allow the app to connect to nearby devices to see the paired adapters.";
+            break;
+        case bridge::BluetoothState::kNoBluetooth:
+            detected_hint_ = "This device has no Bluetooth.";
+            break;
+    }
+}
+#elif defined(__APPLE__)
+#if TARGET_OS_IOS
+void App::detect_devices() noexcept {
+    // The Bluetooth Low Energy adapters a scan finds (Apple keeps the classic ones from apps), the
+    // usual address of a Wi-Fi adapter, and the simulator.
+    detected_count_ = 0U;
+    ios::scan();
+    std::array<ios::FoundDevice, kMaxFound> found{};
+    std::size_t count{0U};
+    const ios::BluetoothState state{ios::found_devices(found, count)};
+    for (std::size_t index{0U}; (index < count) && (detected_count_ < detected_.size()); ++index) {
+        Detected& detected{detected_[detected_count_]};
+        detected.label.clear();
+        detected.device.clear();
+        static_cast<void>(detected.label.append(found[index].name.text()) && detected.label.append("  (Bluetooth)"));
+        static_cast<void>(detected.device.append(kBluetoothLowEnergyPrefix) &&
+                          detected.device.append(found[index].identifier.text()));
+        ++detected_count_;
+    }
+    add_wifi_and_simulator(ios::kSimulatorDevice);
+    switch (state) {
+        case ios::BluetoothState::kReady:
+        case ios::BluetoothState::kStarting:
+            detected_hint_ = (count == 0U) ? "Looking for Bluetooth adapters..." : "";
+            break;
+        case ios::BluetoothState::kOff:
+            detected_hint_ = "Bluetooth is off: turn it on to find the Bluetooth adapters.";
+            break;
+        case ios::BluetoothState::kNoPermission:
+            detected_hint_ = "Allow the app to use Bluetooth in the Settings to find the Bluetooth adapters.";
+            break;
+        case ios::BluetoothState::kUnsupported:
+            detected_hint_ = "This device has no Bluetooth Low Energy.";
+            break;
+    }
+}
+#else
+void App::detect_devices() noexcept {
+    // The serial devices of USB and Bluetooth adapters are /dev/cu.<name>, e.g. cu.usbserial-A50285BI
+    // (FTDI) or cu.wchusbserial1420 (CH340).
+    detected_count_ = 0U;
+    DIR* const directory{::opendir("/dev")};
+    bool more{directory != nullptr};
+    for (std::size_t round{0U}; more && (round < kMaxDeviceEntries) && (detected_count_ < detected_.size()); ++round) {
+        const dirent* const entry{::readdir(directory)};
+        more = entry != nullptr;
+        const std::string_view name{more ? std::string_view{entry->d_name} : std::string_view{}};
+        bool adapter{(name.size() > kSerialPrefix.size()) &&
+                     (std::string_view{name.data(), kSerialPrefix.size()} == kSerialPrefix)};
+        for (const std::string_view other : kNotAdapters) {
+            adapter = adapter && (name != other);
+        }
+        if (adapter) {
+            Detected& detected{detected_[detected_count_]};
+            detected.device.clear();
+            if (detected.device.append("/dev/") && detected.device.append(name)) {
+                static_cast<void>(detected.label.assign(detected.device.view()));  // Cannot fail: as long.
+                ++detected_count_;
+            }
+        }
+    }
+    if (directory != nullptr) {
+        static_cast<void>(::closedir(directory));
+    }
+}
+#endif
 #else
 void App::detect_devices() noexcept {
     detected_count_ = 0U;
@@ -1963,13 +2098,32 @@ void App::detect_devices() noexcept {
             common::StaticString<ConnectionSettings::kMaxDeviceLength> path{};
             const bool built{path.append(prefix) && path.append(number)};
             if (built && (::access(path.c_str(), F_OK) == 0) && (detected_count_ < detected_.size())) {
-                detected_[detected_count_] = path;
+                detected_[detected_count_].device = path;
+                static_cast<void>(detected_[detected_count_].label.assign(path.view()));  // Cannot fail: short.
                 ++detected_count_;
             }
         }
     }
 }
 #endif
+
+void App::add_wifi_and_simulator(const std::string_view simulator) noexcept {
+    if (detected_count_ < detected_.size()) {
+        Detected& wifi{detected_[detected_count_]};
+        wifi.label.clear();
+        wifi.device.clear();
+        // Cannot fail: both are short.
+        static_cast<void>(wifi.label.append("Wi-Fi adapter  ") && wifi.label.append(kDefaultWifiDevice));
+        static_cast<void>(wifi.device.assign(kDefaultWifiDevice));
+        ++detected_count_;
+    }
+    if (detected_count_ < detected_.size()) {
+        Detected& demo{detected_[detected_count_]};
+        static_cast<void>(demo.label.assign("Simulator (demo, no car)"));  // Cannot fail: short.
+        static_cast<void>(demo.device.assign(simulator));
+        ++detected_count_;
+    }
+}
 
 common::ByteSet App::selection() const noexcept {
     common::ByteSet pids{};

@@ -887,7 +887,7 @@ std::int32_t Session::report_connect_failure(const common::Status status) noexce
     std::int32_t exit_code{kExitFailure};
     switch (controller_.connect_failure()) {
         case ConnectFailure::kOpen: {
-            const Explanation explanation{explain_open_failure(status)};
+            const Explanation explanation{explain_open_failure(status, controller_.settings().device.view())};
             Line line{};
             line.text(kProgram).text(": ").text(controller_.settings().device.text()).text(": ");
             line.text(explanation.reason);

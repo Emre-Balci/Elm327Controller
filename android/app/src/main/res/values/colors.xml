@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- The clear colour of the window (gui/main_android.cpp). -->
+    <color name="background">#FF141417</color>
+    <color name="icon_background">#FF1E2228</color>
+</resources>
