@@ -9,6 +9,11 @@ if(ELM327_BUILD_TESTS OR NOT ELM327_BUILD_GUI STREQUAL "OFF")
     target_link_libraries(elm327gui_core
         PUBLIC elm327::elm327
         PRIVATE common::options)
+    if(WIN32)
+        # The configuration directory is a known folder of the shell (shell32, with its GUID in uuid),
+        # which allocates the path with the COM allocator (ole32).
+        target_link_libraries(elm327gui_core PRIVATE shell32 ole32 uuid)
+    endif()
 endif()
 
 if(ELM327_BUILD_GUI STREQUAL "OFF")
@@ -22,7 +27,12 @@ if(NOT EXISTS "${ELM327_IMGUI_DIR}/imgui.cpp")
 endif()
 find_package(glfw3 3.3 QUIET)
 if(NOT glfw3_FOUND)
-    list(APPEND ELM327_GUI_MISSING "GLFW 3.3 or later (sudo apt install libglfw3-dev)")
+    if(WIN32)
+        list(APPEND ELM327_GUI_MISSING
+            "GLFW 3.3 or later (vcpkg install glfw3, or CMAKE_PREFIX_PATH set to an installed GLFW)")
+    else()
+        list(APPEND ELM327_GUI_MISSING "GLFW 3.3 or later (sudo apt install libglfw3-dev)")
+    endif()
 endif()
 if(ELM327_GUI_MISSING)
     list(JOIN ELM327_GUI_MISSING " and " ELM327_GUI_MISSING_TEXT)
@@ -45,11 +55,25 @@ add_library(imgui STATIC
     ${ELM327_IMGUI_DIR}/backends/imgui_impl_opengl3.cpp)
 target_include_directories(imgui SYSTEM PUBLIC "${ELM327_IMGUI_DIR}" "${ELM327_IMGUI_DIR}/backends")
 target_compile_definitions(imgui PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS GLFW_INCLUDE_NONE)
-# The code generation of the project: no exceptions, no RTTI.
-target_compile_options(imgui PRIVATE -fno-exceptions -fno-rtti)
+# The code generation of the project: no exceptions, no RTTI (and with MSVC, a standard library
+# without exceptions, and the sources read as the UTF-8 they are).
+if(MSVC)
+    target_compile_options(imgui PRIVATE /EHs-c- /GR- /utf-8)
+    target_compile_definitions(imgui PRIVATE _HAS_EXCEPTIONS=0)
+else()
+    target_compile_options(imgui PRIVATE -fno-exceptions -fno-rtti)
+endif()
 target_link_libraries(imgui PUBLIC glfw ${CMAKE_DL_LIBS})
 set_target_properties(imgui PROPERTIES CXX_CLANG_TIDY "")
 
-add_executable(elm327gui main.cpp app.cpp dashboard.cpp)
+add_executable(elm327gui main.cpp app.cpp dashboard.cpp ${ELM327_WINDOWS_MANIFEST})
 target_link_libraries(elm327gui PRIVATE elm327gui_core imgui common::options)
 install(TARGETS elm327gui RUNTIME DESTINATION bin)
+
+get_target_property(ELM327_GLFW_TYPE glfw TYPE)
+if(WIN32 AND (ELM327_GLFW_TYPE STREQUAL "SHARED_LIBRARY"))
+    # Windows finds a DLL next to the executable (there is no rpath).
+    add_custom_command(TARGET elm327gui POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:glfw> $<TARGET_FILE_DIR:elm327gui>)
+    install(FILES $<TARGET_FILE:glfw> DESTINATION bin)
+endif()

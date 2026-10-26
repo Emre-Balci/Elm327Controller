@@ -1,7 +1,11 @@
 #include "gui/worker.hpp"
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <sys/eventfd.h>
 #include <unistd.h>
+#endif
 
 #include <array>
 #include <chrono>
@@ -36,18 +40,50 @@ common::Span<const char> span_of(const std::string_view text) noexcept {
     return common::Span<const char>{text.data(), text.size()};
 }
 
-/// Makes the eventfd @p descriptor unreadable again.
-void drain(const std::int32_t descriptor) noexcept {
+/// Creates an eventfd (on Windows, a manual-reset event) that is not readable yet.
+/// @return it; kInvalidNativeHandle if it cannot be created.
+common::NativeHandle create_event() noexcept {
+#if defined(_WIN32)
+    return ::CreateEventW(nullptr, TRUE, FALSE, nullptr);  // nullptr on failure.
+#else
+    const int flags{
+        static_cast<int>(static_cast<std::uint32_t>(EFD_CLOEXEC) | static_cast<std::uint32_t>(EFD_NONBLOCK))};
+    return ::eventfd(0U, flags);  // -1 on failure.
+#endif
+}
+
+/// Closes the event @p descriptor, if it is open.
+void close_event(common::NativeHandle& descriptor) noexcept {
+    if (descriptor != common::kInvalidNativeHandle) {
+#if defined(_WIN32)
+        static_cast<void>(::CloseHandle(descriptor));
+#else
+        static_cast<void>(::close(descriptor));
+#endif
+        descriptor = common::kInvalidNativeHandle;
+    }
+}
+
+/// Makes the event @p descriptor unreadable again.
+void drain(const common::NativeHandle descriptor) noexcept {
+#if defined(_WIN32)
+    static_cast<void>(::ResetEvent(descriptor));
+#else
     std::uint64_t value{0U};
     const ssize_t count{::read(descriptor, &value, sizeof(value))};
     static_cast<void>(count);  // Nothing to drain is fine.
+#endif
 }
 
-/// Makes the eventfd @p descriptor readable.
-void notify_event(const std::int32_t descriptor) noexcept {
+/// Makes the event @p descriptor readable.
+void notify_event(const common::NativeHandle descriptor) noexcept {
+#if defined(_WIN32)
+    static_cast<void>(::SetEvent(descriptor));
+#else
     const std::uint64_t one{1U};
     const ssize_t count{::write(descriptor, &one, sizeof(one))};
     static_cast<void>(count);  // Fails only when the counter is about to overflow: it is readable then.
+#endif
 }
 
 /// Appends as much of @p part to @p text as fits: a message cut short beats no message.
@@ -122,12 +158,12 @@ Worker::~Worker() {
 common::Status Worker::start(const NotifyFunction notify, void* const context) noexcept {
     common::Status status{running_ ? common::Status::kAlreadyRunning : common::Status::kOk};
     if (is_ok(status)) {
-        const int flags{
-            static_cast<int>(static_cast<std::uint32_t>(EFD_CLOEXEC) | static_cast<std::uint32_t>(EFD_NONBLOCK))};
-        wake_descriptor_ = ::eventfd(0U, flags);
-        cancel_descriptor_ = ::eventfd(0U, flags);
-        status = ((wake_descriptor_ >= 0) && (cancel_descriptor_ >= 0)) ? common::Status::kOk
-                                                                         : common::Status::kResourceLimit;
+        wake_descriptor_ = create_event();
+        cancel_descriptor_ = create_event();
+        status = ((wake_descriptor_ != common::kInvalidNativeHandle) &&
+                  (cancel_descriptor_ != common::kInvalidNativeHandle))
+                     ? common::Status::kOk
+                     : common::Status::kResourceLimit;
     }
     if (is_ok(status)) {
         notify_ = notify;
@@ -169,14 +205,8 @@ void Worker::stop() noexcept {
 }
 
 void Worker::close_descriptors() noexcept {
-    if (wake_descriptor_ >= 0) {
-        static_cast<void>(::close(wake_descriptor_));
-        wake_descriptor_ = -1;
-    }
-    if (cancel_descriptor_ >= 0) {
-        static_cast<void>(::close(cancel_descriptor_));
-        cancel_descriptor_ = -1;
-    }
+    close_event(wake_descriptor_);
+    close_event(cancel_descriptor_);
 }
 
 bool Worker::post(const Request& request) noexcept {

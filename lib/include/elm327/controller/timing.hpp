@@ -10,8 +10,7 @@
 #ifndef ELM327_CONTROLLER_TIMING_HPP
 #define ELM327_CONTROLLER_TIMING_HPP
 
-#include <cstdint>
-
+#include "common/core/config.hpp"
 #include "common/core/status.hpp"
 #include "common/time/clock.hpp"
 #include "common/time/deadline.hpp"
@@ -24,10 +23,11 @@ namespace elm327 {
 [[nodiscard]] common::TimePoint next_activation(common::TimePoint previous, common::Duration interval,
                                                 common::TimePoint now) noexcept;
 
-/// Waits until @p deadline, or until @p descriptor becomes readable; -1 waits for the deadline only.
+/// Waits until @p deadline, or until @p descriptor becomes readable (on Windows, until the event is
+/// signaled); kInvalidNativeHandle waits for the deadline only.
 /// @return kOk when the deadline passed; kInterrupted when the descriptor became readable first;
 ///         kSystemError if waiting failed.
-common::Status wait_until(std::int32_t descriptor, const common::Deadline& deadline) noexcept;
+common::Status wait_until(common::NativeHandle descriptor, const common::Deadline& deadline) noexcept;
 
 }  // namespace elm327
 

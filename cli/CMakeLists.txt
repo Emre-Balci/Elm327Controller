@@ -7,6 +7,12 @@ add_library(elm327ctl_core STATIC
     options.cpp
     shell.cpp
     terminal.cpp)
+# The terminal (raw mode, waiting for keys) is platform-specific.
+if(WIN32)
+    target_sources(elm327ctl_core PRIVATE terminal_win32.cpp)
+else()
+    target_sources(elm327ctl_core PRIVATE terminal_posix.cpp)
+endif()
 # The sources include each other as "cli/<file>.hpp".
 target_include_directories(elm327ctl_core PUBLIC "${PROJECT_SOURCE_DIR}")
 target_link_libraries(elm327ctl_core
@@ -14,7 +20,7 @@ target_link_libraries(elm327ctl_core
     PRIVATE common::options)
 
 if(ELM327_BUILD_CLI)
-    add_executable(elm327ctl main.cpp)
+    add_executable(elm327ctl main.cpp ${ELM327_WINDOWS_MANIFEST})
     target_link_libraries(elm327ctl PRIVATE elm327ctl_core common::options)
     install(TARGETS elm327ctl RUNTIME DESTINATION bin)
 endif()

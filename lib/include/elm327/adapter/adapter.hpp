@@ -9,7 +9,8 @@
 ///
 /// Adapter sends a command and collects the reply up to the prompt (execute()), and puts the
 /// adapter into a known state (initialize()). Every operation waits at most until a deadline and
-/// can be cancelled through a descriptor, e.g. a signalfd that becomes readable on Ctrl+C.
+/// can be cancelled through a descriptor, e.g. a signalfd that becomes readable on Ctrl+C (on
+/// Windows, an event that is signaled).
 ///
 /// Serial I/O blocks in the kernel, so nothing here is safe on the real-time path: use an Adapter
 /// on a non-real-time thread, as common::SerialPort requires.
@@ -24,6 +25,7 @@
 
 #include "common/containers/span.hpp"
 #include "common/containers/static_string.hpp"
+#include "common/core/config.hpp"
 #include "common/core/status.hpp"
 #include "common/file/serial_port.hpp"
 #include "common/protocol/delimited_framer.hpp"
@@ -89,13 +91,16 @@ public:
     static constexpr std::size_t kMaxCommandLength{64U};
 
     Adapter() noexcept;
-    ~Adapter() = default;
+    /// Closes the serial device if one is open.
+    ~Adapter();
     Adapter(const Adapter&) = delete;
     Adapter& operator=(const Adapter&) = delete;
     Adapter(Adapter&&) = delete;
     Adapter& operator=(Adapter&&) = delete;
 
-    /// Opens the serial device @p path, e.g. "/dev/ttyUSB0" (USB) or "/dev/rfcomm0" (Bluetooth).
+    /// Opens the serial device @p path, e.g. "/dev/ttyUSB0" (USB) or "/dev/rfcomm0" (Bluetooth); on
+    /// Windows a COM port, e.g. "COM3", or a named pipe ("\\\\.\\pipe\\<name>"), which elm327sim
+    /// offers there in place of the pseudo-terminal it uses on Linux.
     /// @return the errors of common::SerialPort::open(), e.g. kNotFound, kPermissionDenied (not in
     ///         the dialout group) or kResourceLimit (in use by another program).
     common::Status open(const char* path, const AdapterOptions& options) noexcept;
@@ -104,13 +109,18 @@ public:
     common::Status close() noexcept;
 
     [[nodiscard]] bool is_open() const noexcept {
+#if defined(_WIN32)
+        return port_.is_open() || (pipe_ != common::kInvalidNativeHandle);
+#else
         return port_.is_open();
+#endif
     }
 
     /// Makes operations cancellable: once @p descriptor is readable (e.g. a signalfd after Ctrl+C,
-    /// or an eventfd), operations stop waiting and fail with kInterrupted. -1, the default, turns
-    /// it off. The descriptor stays owned by the caller.
-    void set_cancel_descriptor(std::int32_t descriptor) noexcept {
+    /// or an eventfd), operations stop waiting and fail with kInterrupted. On Windows it is a
+    /// manual-reset event, which cancels while it is signaled. kInvalidNativeHandle (-1 on Linux),
+    /// the default, turns it off. The descriptor stays owned by the caller.
+    void set_cancel_descriptor(const common::NativeHandle descriptor) noexcept {
         cancel_descriptor_ = descriptor;
     }
 
@@ -172,9 +182,26 @@ private:
     bool consume(std::string_view command, common::Span<const std::uint8_t> received, Response& response,
                  bool& first_line) noexcept;
 
-    /// Waits until the port has input or reports an error, the cancel descriptor is readable, or
-    /// @p deadline passes. @return kOk, kInterrupted or kTimeout.
-    common::Status wait_for_input(const common::Deadline& deadline) const noexcept;
+    // The I/O on the device, in adapter_posix.cpp and adapter_win32.cpp.
+
+    /// Opens the device; see open().
+    common::Status open_device(const char* path, const common::SerialOptions& options) noexcept;
+
+    /// Closes the device; see close().
+    common::Status close_device() noexcept;
+
+    /// Discards the input that has arrived but has not been read.
+    common::Status discard_input() noexcept;
+
+    /// Writes all of @p data, waiting until @p deadline when the device takes no more for a while.
+    common::Status write_all(common::Span<const std::uint8_t> data, const common::Deadline& deadline) noexcept;
+
+    /// Waits until input arrives, the device reports an error, the cancel descriptor is readable
+    /// or @p deadline passes, and reads the input that has arrived into @p buffer.
+    /// @return the number of bytes read, 0 for a wake-up without input; kInterrupted, kTimeout, or
+    ///         the errors of common::SerialPort::read(), e.g. kDisconnected.
+    [[nodiscard]] common::Result<std::size_t> receive(common::Span<std::uint8_t> buffer,
+                                                      const common::Deadline& deadline) noexcept;
 
     /// ATZ, and keeps the identification it prints.
     common::Status reset() noexcept;
@@ -194,7 +221,13 @@ private:
     common::StaticString<Response::kMaxLineLength> identity_{};
     TraceFunction trace_function_{nullptr};
     void* trace_context_{nullptr};
-    std::int32_t cancel_descriptor_{-1};
+    common::NativeHandle cancel_descriptor_{common::kInvalidNativeHandle};
+#if defined(_WIN32)
+    /// The named pipe open in place of port_, or kInvalidNativeHandle.
+    common::NativeHandle pipe_{common::kInvalidNativeHandle};
+    /// Manual-reset event of the overlapped reads, and of the writes to a pipe; created by open().
+    common::NativeHandle event_{common::kInvalidNativeHandle};
+#endif
     /// The last command ended before the adapter's prompt: the adapter may still be answering it.
     bool unsettled_{false};
 };

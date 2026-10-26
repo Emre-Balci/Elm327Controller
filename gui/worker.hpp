@@ -35,6 +35,7 @@
 #include "common/concurrency/triple_buffer.hpp"
 #include "common/containers/static_string.hpp"
 #include "common/containers/static_vector.hpp"
+#include "common/core/config.hpp"
 #include "common/core/status.hpp"
 #include "common/protocol/delimited_framer.hpp"
 #include "common/system/thread.hpp"
@@ -347,8 +348,10 @@ private:
     common::SpscQueue<FeatureResult, kFeatureCapacity> feature_results_{};
     std::atomic<std::uint32_t> generation_{0U};
     std::atomic<std::uint64_t> dropped_{0U};
-    std::int32_t wake_descriptor_{-1};    ///< eventfd: a request was posted.
-    std::int32_t cancel_descriptor_{-1};  ///< eventfd: the Controller's cancel descriptor.
+    /// An eventfd (on Windows, a manual-reset event): a request was posted.
+    common::NativeHandle wake_descriptor_{common::kInvalidNativeHandle};
+    /// Another one: the Controller's cancel descriptor.
+    common::NativeHandle cancel_descriptor_{common::kInvalidNativeHandle};
     NotifyFunction notify_{nullptr};
     void* notify_context_{nullptr};
     common::RtThread thread_{};

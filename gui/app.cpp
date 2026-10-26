@@ -1,6 +1,10 @@
 #include "gui/app.hpp"
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <unistd.h>
+#endif
 
 #include <array>
 #include <chrono>
@@ -40,10 +44,15 @@ constexpr std::array<const char*, kBaudRates.size()> kBaudNames{{
     "9600", "19200", "38400", "57600", "115200", "230400", "460800", "500000", "921600", "1000000", "2000000",
 }};
 
+#if defined(_WIN32)
+/// The COM ports looked for: USB and Bluetooth adapters get numbers up to here.
+constexpr std::uint32_t kMaxComPort{255U};
+#else
 /// The serial devices of USB adapters (FTDI, CH340 and PL2303 chips; CDC ACM) and of Bluetooth
 /// adapters bound with rfcomm, each with the numbers 0 to 7.
 constexpr std::array<std::string_view, 3U> kDevicePrefixes{{"/dev/ttyUSB", "/dev/ttyACM", "/dev/rfcomm"}};
 constexpr std::string_view kDeviceNumbers{"01234567"};
+#endif
 
 /// The interval of a monitor, in ms.
 constexpr std::int32_t kMinInterval{50};
@@ -1926,6 +1935,27 @@ void App::reset_histories(const common::ByteSet& pids) noexcept {
     }
 }
 
+#if defined(_WIN32)
+void App::detect_devices() noexcept {
+    detected_count_ = 0U;
+    for (std::uint32_t number{1U}; (number <= kMaxComPort) && (detected_count_ < detected_.size()); ++number) {
+        common::StaticString<ConnectionSettings::kMaxDeviceLength> name{};
+        std::array<wchar_t, 16U> wide{};
+        const bool built{name.append("COM") && common::append_unsigned(name, number) &&
+                         (::MultiByteToWideChar(CP_UTF8, 0U, name.c_str(), -1, wide.data(),
+                                                static_cast<int>(wide.size())) > 0)};
+        // A port exists when its device name does, e.g. COM3 for \Device\Serial0. Nothing is opened.
+        std::array<wchar_t, 256U> target{};
+        const bool exists{built && ((::QueryDosDeviceW(wide.data(), target.data(), static_cast<DWORD>(target.size())) !=
+                                     0U) ||
+                                    (::GetLastError() == ERROR_INSUFFICIENT_BUFFER))};
+        if (exists) {
+            detected_[detected_count_] = name;
+            ++detected_count_;
+        }
+    }
+}
+#else
 void App::detect_devices() noexcept {
     detected_count_ = 0U;
     for (const std::string_view prefix : kDevicePrefixes) {
@@ -1939,6 +1969,7 @@ void App::detect_devices() noexcept {
         }
     }
 }
+#endif
 
 common::ByteSet App::selection() const noexcept {
     common::ByteSet pids{};

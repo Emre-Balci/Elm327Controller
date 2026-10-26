@@ -4,9 +4,9 @@
 /// The Features tab lists the features of two sets of definitions (see expert::parse_features()):
 /// the ones built in for elm327sim's simulated car, so that the tab can be tried without a car, and
 /// the user's own file, by default features.ini in the configuration directory
-/// ~/.config/elm327controller. Every change the tab makes is appended to backups.txt in that
-/// directory, with the setting's value before and after, so that it can be restored even after the
-/// program has ended (with the Expert tab, or by hand).
+/// ~/.config/elm327controller (on Windows, %APPDATA%\elm327controller). Every change the tab makes
+/// is appended to backups.txt in that directory, with the setting's value before and after, so that
+/// it can be restored even after the program has ended (with the Expert tab, or by hand).
 
 #ifndef ELM327_GUI_FEATURES_HPP
 #define ELM327_GUI_FEATURES_HPP
@@ -25,13 +25,21 @@ namespace gui {
 /// A path of a file or a directory.
 using Path = common::StaticString<512U>;
 
+/// The separator that config_directory() puts between the parts of a path.
+#if defined(_WIN32)
+inline constexpr char kPathSeparator{'\\'};
+#else
+inline constexpr char kPathSeparator{'/'};
+#endif
+
 /// The definitions of the features of elm327sim's simulated car: its instrument cluster at 714 and
 /// its body control module at 70E. They identify the simulator's modules (part numbers that start
 /// with "SIM-"), so on a real car they find "not this module" or "no answer" and change nothing.
 [[nodiscard]] std::string_view simulator_features() noexcept;
 
 /// The directory of the user's definitions and backups, ~/.config/elm327controller, with the home
-/// directory from the password database (not the environment).
+/// directory from the password database (not the environment). On Windows it is elm327controller in
+/// the user's roaming application data, the known folder that %APPDATA% names.
 /// @return kOk; kNotFound when the home directory is unknown; kOutOfRange when the path is too long.
 [[nodiscard]] common::Status config_directory(Path& directory) noexcept;
 

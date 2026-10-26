@@ -1,9 +1,9 @@
 # Elm327Controller — notes for Claude
 
-C++17 tools for ELM327 OBD-II adapters on Linux, built on the Common library, in two parts: the
-static library `libelm327`, and the front-ends on it, `elm327ctl` (command line and interactive
-shell) and `elm327gui` (Dear ImGui). See README.md for the commands, the layers and how Common is
-used.
+C++17 tools for ELM327 OBD-II adapters on Linux and Windows (MSVC), built on the Common library, in
+two parts: the static library `libelm327`, and the front-ends on it, `elm327ctl` (command line and
+interactive shell) and `elm327gui` (Dear ImGui). See README.md for the commands, the layers and how
+Common is used.
 
 ## Layout
 - `lib/`: the static library. Headers in `lib/include/elm327/<group>/`, sources in
@@ -37,18 +37,22 @@ used.
   `kFeatureRead`, `kFeatureChange` and `kFeatureRestore` with the definition by value and gets a
   `FeatureResult` each through another queue; `features` (in `elm327gui_core`) holds the built-in
   definitions, loads the user's file and appends every change to `backups.txt` in
-  `~/.config/elm327controller` (found with `getpwuid_r`, as MISRA bans `getenv`). Widget mode:
+  `~/.config/elm327controller` (found with `getpwuid_r`, as MISRA bans `getenv`; on Windows
+  `%APPDATA%\elm327controller`, the known folder from `SHGetKnownFolderPath`). Widget mode:
   `gauge` (also in `elm327gui_core`, no ImGui) holds the scale of every dial and plans the layout,
   so a new dial is a row in its table plus a test; `dashboard` draws them.
-- `sim/`: `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal, and the `elm327sim`
-  tool. It answers OBD-II (service 01/03/04/07/09/0A) and a subset of UDS (sessions, read/write data
-  by identifier, routine, security, tester present, reset). The engine module answers the default
+- `sim/`: `FakeElm327`, a simulated adapter and vehicle on a pseudo-terminal (on Windows, a named
+  pipe, which `Adapter` opens in place of a COM port), and the `elm327sim` tool. It answers OBD-II
+  (service 01/03/04/07/09/0A) and a subset of UDS (sessions, read/write data by identifier, routine,
+  security, tester present, reset). The engine module answers the default
   header with `Vehicle::data_by_identifier`; `Vehicle::modules` adds modules at their own header
   (ATSH), e.g. the cluster at 714, and any other header gets "NO DATA". Writes to
   `session_protected_dids` need the extended session, and `locked_dids` refuse them (security
   access). `did_value()` lets a test check what a write did, and that in read-only mode none
   arrived. Extend it whenever the library learns a new command, so the tests can cover it.
 - `tests/<group>/`, `tests/cli/`, `tests/gui/`: tests with the same minimal framework as Common's.
+  `test_support.hpp` has what they need from the OS (cancel events, captured output, pipes), with
+  its OS code in `test_support.cpp`.
 - `third_party/common`: the Common library as a git submodule. Do not edit it here: changes to
   Common go to its own repository (`/mnt/d/Repos/Common`), and this repository then moves the
   submodule to the new commit.
@@ -57,6 +61,24 @@ used.
 
 A new source file is added to its directory's `CMakeLists.txt` (or `tests/CMakeLists.txt`) and,
 for a new component, to the README tables.
+
+## Platforms
+Linux and Windows (MSVC), like Common. Platform code sits in `#if defined(_WIN32)` / `#else` blocks
+next to the POSIX code, so both stay in step; a component that is mostly platform-specific has
+`<name>.cpp` (shared parts), `<name>_posix.cpp` and `<name>_win32.cpp`, chosen in its
+`CMakeLists.txt`: the adapter's I/O (`adapter_*`), the stop signals (`signals_*`) and the shell's
+terminal (`terminal_*`). Descriptors are `common::NativeHandle`: an eventfd or a signalfd on Linux,
+a manual-reset event on Windows, and `common::kInvalidNativeHandle` for none.
+- Public headers never include `<windows.h>`. CMake defines `NOMINMAX` and `WIN32_LEAN_AND_MEAN` for
+  every target. Test headers stay free of it too, since it defines macros such as `near`: their OS
+  code goes into `tests/test_support.cpp`.
+- On Windows, `Adapter` opens a COM port through `common::SerialPort` and reads it with overlapped
+  I/O that also ends at the cancel event; it opens a named pipe (`\\.\pipe\...`) itself, which is
+  how `elm327sim` and the tests reach it. Console control events stand in for the stop signals:
+  Ctrl+C is SIGINT, Ctrl+Break SIGBREAK, closing the console window SIGTERM.
+- The shell's console runs in raw mode with VT input and output, so `LineEditor` gets the same
+  escape sequences as on a terminal.
+- Keep the Linux behaviour unchanged when adding Windows code, and say in the header what differs.
 
 ## Rules for the library, the CLI and the GUI's own code (`lib/`, `cli/`, `gui/`)
 The rules of Common's CLAUDE.md apply:
@@ -96,6 +118,15 @@ cmake --preset gcc-debug && cmake --build --preset gcc-debug && ctest --preset g
 Before finishing a change, run `gcc-release`, `clang-release`, `asan` and `tsan` too. All of them
 must build warning-free (`-Werror`) and pass. Try a change by hand with `elm327sim`: `elm327ctl -d
 <its device>` (the shell), `elm327ctl -d <device> <command>`, and `elm327gui -d <device>`.
+
+For Windows, run `msvc-debug`, `msvc-release` and `msvc-asan` (also warning-free, `/WX`). From WSL,
+put the commands in a `.bat` file that first calls `vcvars64.bat` of Visual Studio 2022 (find it
+with `vswhere.exe -latest -property installationPath`, under `VC\Auxiliary\Build`), then run it
+with `cmd.exe /c` from a directory on a `/mnt/<drive>` path; the built `.exe` files also run directly
+from WSL. `msvc-release` matters: MSVC 19.40 has miscompiled code at `/O2` that passed in Debug. The
+GUI needs a GLFW for MSVC: configure with `-DCMAKE_PREFIX_PATH=<its install directory>`. The
+`*_on_a_console` tests run elm327ctl in a pseudo console, and `elm327gui --screenshot` works there
+too. Never open a real COM port in a test.
 
 The GUI is built when GLFW 3.3+ is found (`ELM327_BUILD_GUI=AUTO`): `sudo apt install
 libglfw3-dev`. On this machine, without sudo, GLFW is that Ubuntu package extracted into `~/.local`,

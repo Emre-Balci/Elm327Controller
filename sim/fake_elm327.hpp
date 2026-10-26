@@ -1,10 +1,15 @@
 /// @file fake_elm327.hpp
-/// @brief A simulated ELM327 adapter, connected to a simulated vehicle, on a pseudo-terminal.
+/// @brief A simulated ELM327 adapter, connected to a simulated vehicle, on a pseudo-terminal (on
+///        Windows, a named pipe).
 ///
 /// FakeElm327 creates a pseudo-terminal and answers on its master side like an ELM327 v1.5:
 /// AT commands (reset, echo, line feeds, spaces, protocols, voltage, ...) and OBD requests for the
 /// service 01 PIDs, the trouble codes and the VIN, in the CAN (ISO 15765-4) form or the
 /// ISO 9141-2 form. Programs open device_path() like the serial device of a real adapter.
+///
+/// Windows has no pseudo-terminals, and a COM port needs a driver. There FakeElm327 creates a named
+/// pipe instead, which elm327::Adapter opens in place of a COM port, and serves one program at a
+/// time, as the pseudo-terminal does.
 ///
 /// It is the fixture of the tests and the heart of the elm327sim tool. Like the tests, it is
 /// development tooling outside the compliance scope of the library: it uses std::string,
@@ -79,10 +84,10 @@ struct Behaviour final {
 
 class FakeElm327 final {
 public:
-    /// Creates the pseudo-terminal and starts answering on it.
+    /// Creates the pseudo-terminal (the pipe) and starts answering on it.
     explicit FakeElm327(Vehicle vehicle = example_vehicle(), Behaviour behaviour = Behaviour{});
 
-    /// Stops answering and removes the pseudo-terminal.
+    /// Stops answering and removes the pseudo-terminal (the pipe).
     ~FakeElm327();
 
     FakeElm327(const FakeElm327&) = delete;
@@ -90,10 +95,10 @@ public:
     FakeElm327(FakeElm327&&) = delete;
     FakeElm327& operator=(FakeElm327&&) = delete;
 
-    /// @return true if the pseudo-terminal exists.
+    /// @return true if the pseudo-terminal (the pipe) exists.
     [[nodiscard]] bool valid() const;
 
-    /// The device to open, e.g. "/dev/pts/3".
+    /// The device to open, e.g. "/dev/pts/3"; on Windows "\\\\.\\pipe\\elm327sim-<process>-<n>".
     [[nodiscard]] const std::string& device_path() const {
         return device_path_;
     }
@@ -108,7 +113,8 @@ public:
     /// empty if there is none.
     [[nodiscard]] std::vector<std::uint8_t> did_value(const std::string& header, std::uint16_t did) const;
 
-    /// Removes the pseudo-terminal: for the program that has it open, the device disappears.
+    /// Removes the pseudo-terminal (the pipe): for the program that has it open, the device
+    /// disappears.
     void hang_up();
 
 private:
@@ -150,7 +156,12 @@ private:
     std::string last_command_{};
     std::string input_{};
 
+#if defined(_WIN32)
+    void* pipe_{nullptr};   ///< The HANDLE of the pipe's server end.
+    void* event_{nullptr};  ///< The HANDLE of a manual-reset event for the overlapped I/O on it.
+#else
     int master_{-1};
+#endif
     std::string device_path_{};
     std::atomic<bool> stop_{false};
     std::thread thread_{};

@@ -26,6 +26,7 @@
 #include "common/containers/span.hpp"
 #include "common/containers/static_string.hpp"
 #include "common/containers/static_vector.hpp"
+#include "common/core/config.hpp"
 #include "common/core/status.hpp"
 #include "common/file/serial_port.hpp"
 #include "common/protocol/delimited_framer.hpp"
@@ -39,8 +40,13 @@
 
 namespace elm327 {
 
+#if defined(_WIN32)
+/// The usual COM port of the first USB serial adapter: COM1 and COM2 are kept for built-in ports.
+inline constexpr std::string_view kDefaultDevice{"COM3"};
+#else
 /// The first USB serial adapter: FTDI, CH340 and PL2303 chips appear as /dev/ttyUSB<n>.
 inline constexpr std::string_view kDefaultDevice{"/dev/ttyUSB0"};
+#endif
 
 /// Where and how Controller::connect() reaches the adapter.
 struct ConnectionSettings final {
@@ -50,7 +56,8 @@ struct ConnectionSettings final {
     /// kDefaultDevice at 38400 bit/s, automatic protocol and the default timeouts.
     ConnectionSettings() noexcept;
 
-    /// Serial device, e.g. "/dev/ttyUSB0" (USB) or "/dev/rfcomm0" (Bluetooth).
+    /// Serial device, e.g. "/dev/ttyUSB0" (USB) or "/dev/rfcomm0" (Bluetooth); on Windows a COM
+    /// port, e.g. "COM3".
     common::StaticString<kMaxDeviceLength> device{};
     common::BaudRate baud_rate{common::BaudRate::k38400};
     /// ELM327 protocol number: '0' (automatic), '1' to '9', 'A' to 'C' (see is_valid_protocol()).
@@ -141,9 +148,9 @@ public:
         return adapter_.identity();
     }
 
-    /// See Adapter::set_cancel_descriptor(): once @p descriptor is readable, operations end with
-    /// kInterrupted.
-    void set_cancel_descriptor(std::int32_t descriptor) noexcept {
+    /// See Adapter::set_cancel_descriptor(): once @p descriptor is readable (on Windows, signaled),
+    /// operations end with kInterrupted.
+    void set_cancel_descriptor(const common::NativeHandle descriptor) noexcept {
         adapter_.set_cancel_descriptor(descriptor);
     }
 

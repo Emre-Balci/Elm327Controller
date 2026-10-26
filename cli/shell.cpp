@@ -83,8 +83,8 @@ std::uint64_t milliseconds(const common::Duration duration) noexcept {
 /// The interactive shell: reads lines and runs them over one Session.
 class Shell final {
 public:
-    Shell(const Options& options, const std::int32_t input, Console& out, Console& err,
-          const std::int32_t cancel_descriptor) noexcept
+    Shell(const Options& options, const common::NativeHandle input, Console& out, Console& err,
+          const common::NativeHandle cancel_descriptor) noexcept
         : settings_{options},
           session_{out, err, cancel_descriptor, Style::kShell},
           input_{input, out, cancel_descriptor},
@@ -109,7 +109,7 @@ private:
     LineInput input_;
     Console* out_;
     Console* err_;
-    std::int32_t cancel_descriptor_;
+    common::NativeHandle cancel_descriptor_;
     std::int32_t exit_code_{kExitSuccess};  ///< Of the last command.
     std::int32_t stop_signal_{0};           ///< The signal that ended the shell.
     bool done_{false};
@@ -299,8 +299,8 @@ void Shell::usage_error(const Line& error) noexcept {
 
 }  // namespace
 
-std::int32_t run_shell(const Options& options, const std::int32_t input, Console& out, Console& err,
-                       const std::int32_t cancel_descriptor) noexcept {
+std::int32_t run_shell(const Options& options, const common::NativeHandle input, Console& out, Console& err,
+                       const common::NativeHandle cancel_descriptor) noexcept {
     Shell shell{options, input, out, err, cancel_descriptor};
     return shell.run();
 }

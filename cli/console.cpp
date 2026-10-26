@@ -1,8 +1,13 @@
 #include "cli/console.hpp"
 
+#if defined(_WIN32)
+#include <windows.h>
+#else
 #include <unistd.h>
 
 #include <cerrno>
+#endif
+
 #include <cstddef>
 #include <cstdint>
 #include <string_view>
@@ -15,6 +20,30 @@ namespace {
 
 /// Each round of the write loop writes at least one byte or restarts after EINTR.
 constexpr std::uint32_t kMaxWriteRounds{1000U};
+
+/// One write of @p text to @p descriptor. @return the number of bytes written; 0 when it was
+/// interrupted before it wrote anything; -1 on error, or when nothing was written otherwise.
+std::int64_t write_once(const common::NativeHandle descriptor, const common::Span<const char> text) noexcept {
+    std::int64_t result{-1};
+#if defined(_WIN32)
+    // WriteFile() takes a DWORD count; a line is far shorter.
+    DWORD count{0U};
+    if ((::WriteFile(descriptor, text.data(), static_cast<DWORD>(text.size()), &count, nullptr) != FALSE) &&
+        (count > 0U)) {
+        result = std::int64_t{count};
+    }
+#else
+    const ssize_t count{::write(descriptor, text.data(), text.size())};
+    if (count > 0) {
+        result = std::int64_t{count};
+    } else if ((count < 0) && (errno == EINTR)) {
+        result = 0;
+    } else {
+        // An error, or nothing written.
+    }
+#endif
+    return result;
+}
 
 /// Ends a line that did not fit.
 constexpr std::string_view kCutMark{"..."};
@@ -80,11 +109,10 @@ void Console::print(const std::string_view text) noexcept {
 void Console::write(const common::Span<const char> text) noexcept {
     std::size_t written{0U};
     for (std::uint32_t round{0U}; (!failed_) && (written < text.size()) && (round < kMaxWriteRounds); ++round) {
-        const common::Span<const char> rest{text.subspan(written)};
-        const ssize_t count{::write(descriptor_, rest.data(), rest.size())};
+        const std::int64_t count{write_once(descriptor_, text.subspan(written))};
         if (count > 0) {
             written += static_cast<std::size_t>(count);
-        } else if ((count < 0) && (errno == EINTR)) {
+        } else if (count == 0) {
             // Interrupted before anything was written: write again.
         } else {
             failed_ = true;
@@ -92,6 +120,32 @@ void Console::write(const common::Span<const char> text) noexcept {
     }
     failed_ = failed_ || (written < text.size());
 }
+
+#if defined(_WIN32)
+common::NativeHandle standard_input() noexcept {
+    return ::GetStdHandle(STD_INPUT_HANDLE);
+}
+
+common::NativeHandle standard_output() noexcept {
+    return ::GetStdHandle(STD_OUTPUT_HANDLE);
+}
+
+common::NativeHandle standard_error() noexcept {
+    return ::GetStdHandle(STD_ERROR_HANDLE);
+}
+#else
+common::NativeHandle standard_input() noexcept {
+    return STDIN_FILENO;
+}
+
+common::NativeHandle standard_output() noexcept {
+    return STDOUT_FILENO;
+}
+
+common::NativeHandle standard_error() noexcept {
+    return STDERR_FILENO;
+}
+#endif
 
 }  // namespace cli
 }  // namespace elm327

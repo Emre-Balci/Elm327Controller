@@ -111,7 +111,11 @@ constexpr std::array<std::string_view, 32U> kUsage{{
     "  help              show this help",
     "",
     "Options:",
+#if defined(_WIN32)
+    "  -d, --device PATH   serial device (default COM3)",
+#else
     "  -d, --device PATH   serial device (default /dev/ttyUSB0)",
+#endif
     "  -b, --baud RATE     bit rate (default 38400)",
     "  -p, --protocol N    OBD protocol 0-9 or A-C (default 0: automatic)",
     "  -t, --timeout MS    reply timeout of a command in ms (default 5000)",
@@ -146,7 +150,11 @@ constexpr std::array<std::string_view, 40U> kShellHelp{{
     "  quit              leave the shell (also 'exit' or Ctrl+D)",
     "",
     "Settings:",
+#if defined(_WIN32)
+    "  device PATH       serial device, a COM port such as COM3",
+#else
     "  device PATH       serial device, e.g. /dev/ttyUSB0 or /dev/rfcomm0",
+#endif
     "  baud RATE         bit rate, e.g. 38400, 9600 or 115200",
     "  protocol N        OBD protocol 0-9 or A-C (0: automatic)",
     "  timeout MS        reply timeout of a command in ms",

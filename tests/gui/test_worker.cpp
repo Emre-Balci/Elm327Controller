@@ -240,11 +240,11 @@ TEST_CASE(worker_reports_failures) {
     CHECK(worker->state().message_failed);
     CHECK(worker->state().message.view() == "Not connected: connect to the adapter first.");
 
-    REQUIRE(worker->post(connect_request("/nonexistent/ttyUSB9")));
+    REQUIRE(worker->post(connect_request(test::kMissingDevice)));
     REQUIRE(wait_for(*worker, [](const State& state) { return state.message_count == 2U && idle(state); }));
     CHECK(!worker->state().connected);
-    CHECK(worker->state().message.view() ==
-          "Cannot connect to /nonexistent/ttyUSB9: no such device (choose the adapter's serial device)");
+    CHECK(worker->state().message.view() == "Cannot connect to " + std::string{test::kMissingDevice} +
+                                                ": no such device (choose the adapter's serial device)");
 
     // The device goes away while connected.
     elm327::sim::FakeElm327 fake{};

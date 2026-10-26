@@ -10,6 +10,7 @@
 
 #include "common/containers/span.hpp"
 #include "common/containers/static_string.hpp"
+#include "common/core/config.hpp"
 
 namespace elm327 {
 namespace cli {
@@ -66,11 +67,12 @@ private:
     bool cut_{false};
 };
 
-/// Writes lines to a file descriptor, e.g. STDOUT_FILENO, with one write(2) per line: nothing is
-/// buffered, so lines appear at once even in a pipe.
+/// Writes lines to a file descriptor, e.g. STDOUT_FILENO (on Windows, a HANDLE such as the one of
+/// standard_output()), with one write(2) (WriteFile()) per line: nothing is buffered, so lines
+/// appear at once even in a pipe.
 class Console final {
 public:
-    explicit Console(const std::int32_t descriptor) noexcept : descriptor_{descriptor} {}
+    explicit Console(const common::NativeHandle descriptor) noexcept : descriptor_{descriptor} {}
 
     /// Writes @p line and a newline.
     void print(const Line& line) noexcept;
@@ -87,14 +89,20 @@ public:
         return failed_;
     }
 
-    [[nodiscard]] std::int32_t descriptor() const noexcept {
+    [[nodiscard]] common::NativeHandle descriptor() const noexcept {
         return descriptor_;
     }
 
 private:
-    std::int32_t descriptor_;
+    common::NativeHandle descriptor_;
     bool failed_{false};
 };
+
+/// The standard input, output and error of the process: STDIN_FILENO, STDOUT_FILENO and
+/// STDERR_FILENO, or on Windows the handles GetStdHandle() returns.
+[[nodiscard]] common::NativeHandle standard_input() noexcept;
+[[nodiscard]] common::NativeHandle standard_output() noexcept;
+[[nodiscard]] common::NativeHandle standard_error() noexcept;
 
 }  // namespace cli
 }  // namespace elm327
