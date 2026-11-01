@@ -2,8 +2,12 @@
 # `portable` preset tests the shared POSIX code on Linux). Run it by hand: Actions > Apple > Run
 # workflow. macOS runners count ten times against the Actions minutes of a private repository.
 #
-# The Common submodule is a private repository: the secret SUBMODULE_TOKEN holds a token that can
-# read it (a fine-grained personal access token with read access to Emre-Balci/Common's contents).
+# Both repositories are private: the secret SUBMODULE_TOKEN holds a token that can read them (a
+# fine-grained personal access token with read access to the contents of Emre-Balci/Elm327Controller
+# and Emre-Balci/Common), since actions/checkout uses it for the repository and the submodule alike.
+#
+# The tests take seconds: a test that hangs ends after 2 minutes, with its output (the last "[ RUN  ]"
+# line names the test case), and a job after 20, so that a hang does not run up the 10x minutes.
 name: Apple
 
 on:
@@ -12,6 +16,7 @@ on:
 jobs:
   macos:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,14 +26,17 @@ jobs:
         run: brew install ninja glfw
       - name: Common (debug)
         working-directory: third_party/common
-        run: cmake --preset macos-debug && cmake --build --preset macos-debug && ctest --preset macos-debug
+        run: cmake --preset macos-debug && cmake --build --preset macos-debug && ctest --preset macos-debug --timeout 120 --output-on-failure
       - name: Elm327Controller (debug)
-        run: cmake --preset macos-debug && cmake --build --preset macos-debug && ctest --preset macos-debug
+        if: ${{ !cancelled() }}  # Also after a failure of Common's tests, to see all failures at once.
+        run: cmake --preset macos-debug && cmake --build --preset macos-debug && ctest --preset macos-debug --timeout 120 --output-on-failure
       - name: Elm327Controller (release)
-        run: cmake --preset macos-release && cmake --build --preset macos-release && ctest --preset macos-release
+        if: ${{ !cancelled() }}  # Also after a failure of Common's tests, to see all failures at once.
+        run: cmake --preset macos-release && cmake --build --preset macos-release && ctest --preset macos-release --timeout 120 --output-on-failure
 
   ios:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
         with:

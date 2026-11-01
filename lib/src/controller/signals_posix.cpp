@@ -166,7 +166,8 @@ common::Status StopSignals::open() noexcept {
         g_write_end.store(ends[1U]);
         struct sigaction action {};
         action.sa_handler = &on_stop_signal;
-        static_cast<void>(::sigemptyset(&action.sa_mask));
+        // Unqualified: Darwin's <signal.h> defines sigemptyset as a macro.
+        static_cast<void>(sigemptyset(&action.sa_mask));
         action.sa_flags = SA_RESTART;  // Calls that a signal interrupts go on, except the waits.
         std::size_t installed{0U};
         for (; (installed < kStopSignals.size()) && is_ok(status); ++installed) {
