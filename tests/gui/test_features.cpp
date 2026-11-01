@@ -5,6 +5,7 @@
 #else
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <unistd.h>  // mkdtemp on macOS
 #endif
 
 #include <array>
