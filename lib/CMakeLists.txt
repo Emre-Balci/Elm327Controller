@@ -37,5 +37,5 @@ target_include_directories(elm327
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include" "${CMAKE_CURRENT_BINARY_DIR}/generated"
     PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")  # Internal helpers: "detail/<name>.hpp".
 target_link_libraries(elm327
-    PUBLIC common::common
+    PUBLIC common::base
     PRIVATE common::options)

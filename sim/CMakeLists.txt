@@ -3,7 +3,7 @@
 add_library(elm327_sim STATIC demo.cpp fake_elm327.cpp)
 target_include_directories(elm327_sim PUBLIC "${PROJECT_SOURCE_DIR}")
 target_link_libraries(elm327_sim
-    PUBLIC common::common
+    PUBLIC common::base
     PRIVATE common::options)
 
 if(ELM327_BUILD_SIMULATOR)
